@@ -211,6 +211,7 @@ impl<'ast> ZGen<'ast> {
                 self.circ.exit_scope();
             }
             ast::Statement::Definition(d) => {
+                // XXX(rsw) multi-assignment unimplemented
                 assert!(d.lhs.len() <= 1);
                 let e = self.expr(&d.expression);
                 if let Some(l) = d.lhs.first() {
@@ -410,7 +411,7 @@ impl<'ast> ZGen<'ast> {
             ast::Expression::ArrayInitializer(a) => {
                 let v = self.expr(&a.value);
                 let ty = v.type_();
-                let n = self.const_int(&a.count).to_usize().unwrap();
+                let n = self.const_int(&a.count) as usize;
                 /*
                 let n = const_int(self.const_(&a.count))
                     .unwrap()
@@ -660,67 +661,122 @@ impl<'ast> ZGen<'ast> {
     }
 
     fn visit_files(&mut self) {
+        // first, go through includes and return a toposorted visit order for remaining processing
+        let files = self.visit_includes();
         let t = std::mem::take(&mut self.asts);
-        for (p, f) in &t {
+        for (p, f) in files.iter().map(|p| (p, t.get(p).unwrap())) {
             self.file_stack.push(p.to_owned());
-            for func in &f.functions {
-                debug!("fn {} in {}", func.id.value, self.cur_path().display());
-                self.functions.insert(
-                    (self.cur_path().to_owned(), func.id.value.clone()),
-                    func.clone(),
-                );
-            }
-            for i in &f.imports {
-                let (src_path, src_name, dst_name) = match i {
-                    ast::ImportDirective::Main(m) => (
-                        m.source.value.clone(),
-                        "main".to_owned(),
-                        m.alias
-                            .as_ref()
-                            .map(|a| a.value.clone())
-                            .unwrap_or_else(|| {
-                                PathBuf::from(m.source.value.clone())
-                                    .file_stem()
-                                    .unwrap_or_else(|| panic!("Bad import: {}", m.source.value))
-                                    .to_string_lossy()
-                                    .to_string()
-                            }),
-                    ),
-                    ast::ImportDirective::From(m) => (
-                        m.source.value.clone(),
-                        m.symbol.value.clone(),
-                        m.alias
-                            .as_ref()
-                            .map(|a| a.value.clone())
-                            .unwrap_or_else(|| m.symbol.value.clone()),
-                    ),
-                };
-                let abs_src_path = self.stdlib.canonicalize(&self.cur_dir(), src_path.as_str());
-                debug!(
-                    "Import of {} from {} as {}",
-                    src_name,
-                    abs_src_path.display(),
-                    dst_name
-                );
-                self.import_map.insert(
-                    (self.cur_path().to_path_buf(), dst_name),
-                    (abs_src_path, src_name),
-                );
-            }
-            for s in &f.structs {
-                let ty = Ty::Struct(
-                    s.id.value.clone(),
-                    s.fields
-                        .clone()
-                        .iter()
-                        .map(|f| (f.id.value.clone(), self.type_(&f.ty)))
-                        .collect(),
-                );
-                debug!("struct {}", s.id.value);
-                self.circ.def_type(&s.id.value, ty);
+            for d in f.declarations.iter() {
+                match d {
+                    ast::SymbolDeclaration::Import(_) => {}
+                    ast::SymbolDeclaration::Constant(c) => {
+                        // constant defns: need to add global defs (in self.circ?) and use to eval
+                    }
+                    ast::SymbolDeclaration::Struct(s) => {
+                        // XXX(rsw) need to define structs in a way that handles generics!
+                        /*
+                        let ty = Ty::Struct(
+                            s.id.value.clone(),
+                            s.fields
+                                .clone()
+                                .iter()
+                                .map(|f| (f.id.value.clone(), self.type_(&f.ty)))
+                                .collect(),
+                        );
+                        debug!("struct {}", s.id.value);
+                        self.circ.def_type(&s.id.value, ty);
+                        */
+                    }
+                    ast::SymbolDeclaration::Function(f) => {
+                        debug!("fn {} in {}", f.id.value, self.cur_path().display());
+                        self.functions.insert(
+                            (self.cur_path().to_owned(), f.id.value.clone()),
+                            f.clone(),
+                        );
+                    }
+                }
             }
             self.file_stack.pop();
         }
         self.asts = t;
+    }
+
+    fn visit_includes(&mut self) -> Vec<PathBuf> {
+        use petgraph::graph::{DiGraph, NodeIndex, DefaultIx};
+        use petgraph::algo::toposort;
+        use petgraph::dot::{Dot, Config};
+
+        // we use the graph to toposort the includes and the map to go from PathBuf to NodeIdx
+        let mut ig = DiGraph::<PathBuf, ()>::with_capacity(self.asts.len(), self.asts.len());
+        let mut gn = HashMap::<PathBuf, NodeIndex<DefaultIx>>::with_capacity(self.asts.len());
+
+        for (p, f) in self.asts.iter() {
+            self.file_stack.push(p.to_owned());
+            if !gn.contains_key(p) {
+                gn.insert(p.to_owned(), ig.add_node(p.to_owned()));
+            }
+
+            for d in f.declarations.iter() {
+                if let ast::SymbolDeclaration::Import(i) = d {
+                    let (src_path, src_names, dst_names) = match i {
+                        ast::ImportDirective::Main(m) => (
+                            m.source.value.clone(),
+                            vec!["main".to_owned()],
+                            vec![m.alias
+                                .as_ref()
+                                .map(|a| a.value.clone())
+                                .unwrap_or_else(|| {
+                                    PathBuf::from(m.source.value.clone())
+                                        .file_stem()
+                                        .unwrap_or_else(|| panic!("Bad import: {}", m.source.value))
+                                        .to_string_lossy()
+                                        .to_string()
+                                })],
+                        ),
+                        ast::ImportDirective::From(m) => (
+                            m.source.value.clone(),
+                            m.symbols.iter().map(|s| s.id.value.clone()).collect(),
+                            m.symbols.iter().map(|s| {
+                                s.alias
+                                    .as_ref()
+                                    .map(|a| a.value.clone())
+                                    .unwrap_or_else(|| s.id.value.clone())
+                            }).collect(),
+                        ),
+                    };
+                    assert!(src_names.len() > 0);
+                    let abs_src_path = self.stdlib.canonicalize(&self.cur_dir(), src_path.as_str());
+                    debug!(
+                        "Import of {:?} from {} as {:?}",
+                        src_names,
+                        abs_src_path.display(),
+                        dst_names
+                    );
+                    src_names.into_iter().zip(dst_names.into_iter())
+                        .map(|(sn, dn)| {
+                            self.import_map.insert(
+                                (self.cur_path().to_path_buf(), dn),
+                                (abs_src_path.clone(), sn),
+                            );
+                        });
+
+                    // add included -> includer edge for later toposort
+                    if !gn.contains_key(&abs_src_path) {
+                        gn.insert(abs_src_path.clone(), ig.add_node(abs_src_path.clone()));
+                    }
+                    ig.add_edge(*gn.get(&abs_src_path).unwrap(), *gn.get(p).unwrap(), ());
+                }
+            }
+
+            self.file_stack.pop();
+        }
+
+        toposort(&ig, None)
+            .unwrap_or_else(|e| {
+                panic!("Import graph is cyclic!: {:?}\n{:?}\n",
+                       e,
+                       Dot::with_config(&ig, &[Config::EdgeNoLabel]))
+            })
+            .iter().map(|idx| std::mem::take(ig.node_weight_mut(*idx).unwrap())).collect()
     }
 }

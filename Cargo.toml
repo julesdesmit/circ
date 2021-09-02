@@ -33,6 +33,7 @@ pest = "2.1"
 pest_derive = "2.1"
 pest-ast = "0.3"
 from-pest = "0.3"
+petgraph = "0.6"
 
 [dev-dependencies]
 quickcheck = "1"
