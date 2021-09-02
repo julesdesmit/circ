@@ -94,7 +94,7 @@ struct ZGen<'ast> {
     stdlib: parser::ZStdLib,
     asts: HashMap<PathBuf, ast::File<'ast>>,
     file_stack: Vec<PathBuf>,
-    functions: HashMap<(PathBuf, String), ast::Function<'ast>>,
+    functions: HashMap<(PathBuf, String), ast::FunctionDefinition<'ast>>,
     import_map: HashMap<(PathBuf, String), (PathBuf, String)>,
     mode: Mode,
 }
@@ -289,30 +289,62 @@ impl<'ast> ZGen<'ast> {
         )
     }
 
-    fn const_(&mut self, e: &ast::ConstantExpression<'ast>) -> T {
+    fn literal_(&mut self, e: &ast::LiteralExpression<'ast>) -> T {
         match e {
-            ast::ConstantExpression::U8(u) => {
-                T::Uint(8, bv_lit(u8::from_str_radix(&u.value[2..], 16).unwrap(), 8))
+            ast::LiteralExpression::DecimalLiteral(d) => {
+                let vstr = &d.value.span.as_str();
+                match &d.suffix {
+                    Some(ast::DecimalSuffix::U8(_)) => {
+                        T::Uint(8, bv_lit(u8::from_str_radix(vstr, 10).unwrap(), 8))
+                    }
+                    Some(ast::DecimalSuffix::U16(_)) => {
+                        T::Uint(16, bv_lit(u16::from_str_radix(vstr, 10).unwrap(), 16))
+                    }
+                    Some(ast::DecimalSuffix::U32(_)) => {
+                        T::Uint(32, bv_lit(u32::from_str_radix(vstr, 10).unwrap(), 32))
+                    }
+                    Some(ast::DecimalSuffix::U64(_)) => {
+                        T::Uint(64, bv_lit(u64::from_str_radix(vstr, 10).unwrap(), 64))
+                    }
+                    Some(ast::DecimalSuffix::Field(_)) => {
+                        T::Field(pf_lit(Integer::from_str_radix(vstr, 10).unwrap()))
+                    }
+                    // XXX(rsw) need to infer int size from context. yuck.
+                    _ => unimplemented!(),
+                }
             }
-            ast::ConstantExpression::U16(u) => T::Uint(
-                16,
-                bv_lit(u16::from_str_radix(&u.value[2..], 16).unwrap(), 16),
-            ),
-            ast::ConstantExpression::U32(u) => T::Uint(
-                32,
-                bv_lit(u32::from_str_radix(&u.value[2..], 16).unwrap(), 32),
-            ),
-            ast::ConstantExpression::DecimalNumber(u) => {
-                T::Field(pf_lit(Integer::from_str_radix(&u.value, 10).unwrap()))
+            ast::LiteralExpression::BooleanLiteral(b) => {
+                Self::const_bool(bool::from_str(&b.value).unwrap())
             }
-            ast::ConstantExpression::BooleanLiteral(u) => {
-                Self::const_bool(bool::from_str(&u.value).unwrap())
+            ast::LiteralExpression::HexLiteral(h) => {
+                match &h.value {
+                    ast::HexNumberExpression::U8(h) => {
+                        T::Uint(8, bv_lit(u8::from_str_radix(&h.value[2..], 16).unwrap(), 8))
+                    }
+                    ast::HexNumberExpression::U16(h) => {
+                        T::Uint(16, bv_lit(u16::from_str_radix(&h.value[2..], 16).unwrap(), 16))
+                    }
+                    ast::HexNumberExpression::U32(h) => {
+                        T::Uint(32, bv_lit(u32::from_str_radix(&h.value[2..], 16).unwrap(), 32))
+                    }
+                    ast::HexNumberExpression::U64(h) => {
+                        T::Uint(64, bv_lit(u64::from_str_radix(&h.value[2..], 16).unwrap(), 64))
+                    }
+                }
             }
         }
     }
 
     fn const_bool(b: bool) -> T {
         T::Bool(leaf_term(Op::Const(Value::Bool(b))))
+    }
+
+    fn unary_op(&self, o: &ast::UnaryOperator) -> fn(T) -> Result<T, String> {
+        match o {
+            ast::UnaryOperator::Pos(_) => |x| Ok(x),
+            ast::UnaryOperator::Neg(_) => neg,
+            ast::UnaryOperator::Not(_) => not,
+        }
     }
 
     fn bin_op(&self, o: &ast::BinaryOperator) -> fn(T, T) -> Result<T, String> {
@@ -341,29 +373,33 @@ impl<'ast> ZGen<'ast> {
     fn expr(&mut self, e: &ast::Expression<'ast>) -> T {
         debug!("Expr: {}", e.span().as_str());
         let res = match e {
-            ast::Expression::Constant(c) => Ok(self.const_(c)),
-            ast::Expression::Unary(u) => not(self.expr(&u.expression)),
-            ast::Expression::Binary(u) => {
-                let f = self.bin_op(&u.op);
-                let a = self.expr(&u.left);
-                let b = self.expr(&u.right);
-                f(a, b)
-            }
             ast::Expression::Ternary(u) => {
                 let c = self.expr(&u.first);
                 let a = self.expr(&u.second);
                 let b = self.expr(&u.third);
                 cond(c, a, b)
             }
+            ast::Expression::Binary(u) => {
+                let f = self.bin_op(&u.op);
+                let a = self.expr(&u.left);
+                let b = self.expr(&u.right);
+                f(a, b)
+            }
+            ast::Expression::Unary(u) => {
+                let f = self.unary_op(&u.op);
+                let a = self.expr(&u.expression);
+                f(a)
+            }
             ast::Expression::Identifier(u) => Ok(self
-                .unwrap(self.circ.get_value(Loc::local(u.value.clone())), &u.span)
-                .unwrap_term()),
+               .unwrap(self.circ.get_value(Loc::local(u.value.clone())), &u.span)
+               .unwrap_term()),
             ast::Expression::InlineArray(u) => T::new_array(
                 u.expressions
                     .iter()
                     .flat_map(|x| self.array_lit_elem(x))
                     .collect(),
             ),
+            ast::Expression::Literal(l) => Ok(self.literal_(l)),
             ast::Expression::InlineStruct(u) => Ok(T::Struct(
                 u.ty.value.clone(),
                 u.members
@@ -374,10 +410,13 @@ impl<'ast> ZGen<'ast> {
             ast::Expression::ArrayInitializer(a) => {
                 let v = self.expr(&a.value);
                 let ty = v.type_();
+                let n = self.const_int(&a.count).to_usize().unwrap();
+                /*
                 let n = const_int(self.const_(&a.count))
                     .unwrap()
                     .to_usize()
                     .unwrap();
+                */
                 Ok(T::Array(ty, vec![v; n]))
             }
             ast::Expression::Postfix(p) => {
