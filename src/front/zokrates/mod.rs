@@ -657,6 +657,7 @@ impl<'ast> ZGen<'ast> {
             ast::Type::Basic(ast::BasicType::U8(_)) => Ty::Uint(8),
             ast::Type::Basic(ast::BasicType::U16(_)) => Ty::Uint(16),
             ast::Type::Basic(ast::BasicType::U32(_)) => Ty::Uint(32),
+            ast::Type::Basic(ast::BasicType::U64(_)) => Ty::Uint(64),
             ast::Type::Basic(ast::BasicType::Boolean(_)) => Ty::Bool,
             ast::Type::Basic(ast::BasicType::Field(_)) => Ty::Field,
             ast::Type::Array(a) => {
