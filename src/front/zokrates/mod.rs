@@ -95,6 +95,8 @@ struct ZGen<'ast> {
     asts: HashMap<PathBuf, ast::File<'ast>>,
     file_stack: Vec<PathBuf>,
     functions: HashMap<(PathBuf, String), ast::FunctionDefinition<'ast>>,
+    structs: HashMap<(PathBuf, String), ast::StructDefinition<'ast>>,
+    constants: HashMap<(PathBuf, String), T>,
     import_map: HashMap<(PathBuf, String), (PathBuf, String)>,
     mode: Mode,
 }
@@ -123,6 +125,8 @@ impl<'ast> ZGen<'ast> {
             stdlib: parser::ZStdLib::new(),
             file_stack: vec![],
             functions: HashMap::default(),
+            structs: HashMap::default(),
+            constants: HashMap::default(),
             import_map: HashMap::default(),
             mode,
         };
@@ -314,7 +318,7 @@ impl<'ast> ZGen<'ast> {
                         T::Field(pf_lit(Integer::from_str_radix(vstr, 10).unwrap()))
                     }
                     // XXX(rsw) need to infer int size from context. yuck. error out.
-                    _ => self.err("refusing to infer decimal literal type.", &d.span),
+                    _ => self.err("Refusing to infer literal type. Annotation needed.", &d.span),
                 }
             }
             ast::LiteralExpression::BooleanLiteral(b) => {
@@ -637,6 +641,7 @@ impl<'ast> ZGen<'ast> {
         p
     }
     fn deref_import(&self, s: String) -> (PathBuf, String) {
+        // XXX(rsw) don't we need to chase this through multiple indirections?
         let r = (self.cur_path().to_path_buf(), s);
         self.import_map.get(&r).cloned().unwrap_or(r)
     }
@@ -679,12 +684,11 @@ impl<'ast> ZGen<'ast> {
             self.file_stack.push(p.to_owned());
             for d in f.declarations.iter() {
                 match d {
-                    ast::SymbolDeclaration::Import(_) => {}
+                    ast::SymbolDeclaration::Import(_) => (),
                     ast::SymbolDeclaration::Constant(c) => {
                         // constant defns: need to add global defs (in self.circ?) and use to eval
                     }
                     ast::SymbolDeclaration::Struct(s) => {
-                        // XXX(rsw) need to define structs in a way that handles generics!
                         /*
                         let ty = Ty::Struct(
                             s.id.value.clone(),
@@ -697,6 +701,11 @@ impl<'ast> ZGen<'ast> {
                         debug!("struct {}", s.id.value);
                         self.circ.def_type(&s.id.value, ty);
                         */
+                        debug!("struct {} in {}", s.id.value, self.cur_path().display());
+                        self.structs.insert(
+                            (self.cur_path().to_owned(), s.id.value.clone()),
+                            s.clone(),
+                        );
                     }
                     ast::SymbolDeclaration::Function(f) => {
                         debug!("fn {} in {}", f.id.value, self.cur_path().display());
@@ -765,7 +774,7 @@ impl<'ast> ZGen<'ast> {
                         dst_names
                     );
                     src_names.into_iter().zip(dst_names.into_iter())
-                        .map(|(sn, dn)| {
+                        .for_each(|(sn, dn)| {
                             self.import_map.insert(
                                 (self.cur_path().to_path_buf(), dn),
                                 (abs_src_path.clone(), sn),

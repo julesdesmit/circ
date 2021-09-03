@@ -333,7 +333,6 @@ fn neg_uint(a: Term) -> Term {
     term![Op::BvUnOp(BvUnOp::Neg); a]
 }
 
-#[allow(dead_code)]
 // Missing from ZoKrates.
 pub fn neg(a: T) -> Result<T, String> {
     wrap_un_op("unary-", Some(neg_uint), Some(neg_field), None, a)
