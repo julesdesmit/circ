@@ -129,16 +129,24 @@ impl<'a> Loader for &'a ZLoad {
     fn includes<P: AsRef<Path>>(&self, ast: &Self::AST, p: &P) -> Vec<PathBuf> {
         let mut c = p.as_ref().to_path_buf();
         c.pop();
-        ast.imports
+        ast.declarations
             .iter()
-            .map(|i| {
-                let ext = match i {
-                    ast::ImportDirective::Main(m) => &m.source.value,
-                    ast::ImportDirective::From(m) => &m.source.value,
-                };
-                self.stdlib.canonicalize(&c, ext)
+            .filter_map(|d| {
+                if let ast::SymbolDeclaration::Import(i) = d {
+                    let ext = match i {
+                        ast::ImportDirective::Main(m) => &m.source.value,
+                        ast::ImportDirective::From(m) => &m.source.value,
+                    };
+                    let p = self.stdlib.canonicalize(&c, ext);
+                    if p.to_str().map(|s| !s.contains("EMBED")).unwrap_or(true) {
+                        Some(p)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
             })
-            .filter(|p| p.to_str().map(|s| !s.contains("EMBED")).unwrap_or(true))
             .collect()
     }
 }

@@ -166,6 +166,7 @@ impl<'ast> ZGen<'ast> {
         debug!("Stmt: {}", s.span().as_str());
         match s {
             ast::Statement::Return(r) => {
+                // XXX(rsw) multi-return unimplemented
                 assert!(r.expressions.len() <= 1);
                 if let Some(e) = r.expressions.first() {
                     let ret = self.expr(e);
@@ -216,27 +217,29 @@ impl<'ast> ZGen<'ast> {
                 let e = self.expr(&d.expression);
                 if let Some(l) = d.lhs.first() {
                     let ty = e.type_();
-                    if let Some(t) = l.ty.as_ref() {
-                        let decl_ty = self.type_(t);
-                        if decl_ty != ty {
-                            self.err(
-                                format!(
-                                    "Assignment type mismatch: {} annotated vs {} actual",
-                                    decl_ty, ty,
-                                ),
-                                &d.span,
-                            );
+                    match l {
+                        ast::TypedIdentifierOrAssignee::Assignee(l) => {
+                            let lval = self.lval(l);
+                            let mod_res = self.mod_lval(lval, e);
+                            self.unwrap(mod_res, &d.span);
                         }
-                        assert!(l.a.accesses.len() == 0);
-                        let d_res =
-                            self.circ
-                                .declare_init(l.a.id.value.clone(), decl_ty, Val::Term(e));
-                        self.unwrap(d_res, &d.span);
-                    } else {
-                        // Assignee case
-                        let lval = self.lval(&l.a);
-                        let mod_res = self.mod_lval(lval, e);
-                        self.unwrap(mod_res, &d.span);
+                        ast::TypedIdentifierOrAssignee::TypedIdentifier(l) => {
+                            let decl_ty = self.type_(&l.ty);
+                            if decl_ty != ty {
+                                self.err(
+                                    format!(
+                                        "Assignment type mismatch: {} annotatved vs {} actual",
+                                        decl_ty,
+                                        ty,
+                                    ),
+                                    &d.span,
+                                );
+                            }
+                            let d_res = self
+                                .circ
+                                .declare_init(l.identifier.value.clone(), decl_ty, Val::Term(e));
+                            self.unwrap(d_res, &d.span);
+                        }
                     }
                 }
             }
@@ -310,8 +313,8 @@ impl<'ast> ZGen<'ast> {
                     Some(ast::DecimalSuffix::Field(_)) => {
                         T::Field(pf_lit(Integer::from_str_radix(vstr, 10).unwrap()))
                     }
-                    // XXX(rsw) need to infer int size from context. yuck.
-                    _ => unimplemented!(),
+                    // XXX(rsw) need to infer int size from context. yuck. error out.
+                    _ => self.err("refusing to infer decimal literal type.", &d.span),
                 }
             }
             ast::LiteralExpression::BooleanLiteral(b) => {
@@ -371,6 +374,7 @@ impl<'ast> ZGen<'ast> {
             ast::BinaryOperator::Pow => unimplemented!(),
         }
     }
+
     fn expr(&mut self, e: &ast::Expression<'ast>) -> T {
         debug!("Expr: {}", e.span().as_str());
         let res = match e {
@@ -422,10 +426,16 @@ impl<'ast> ZGen<'ast> {
             }
             ast::Expression::Postfix(p) => {
                 // Assume no functions in arrays, etc.
+                // XXX(rsw) is this a reasonable assumption? probably...
                 let (base, accs) = if let Some(ast::Access::Call(c)) = p.accesses.first() {
                     debug!("Call: {}", p.id.value);
                     let (f_path, f_name) = self.deref_import(p.id.value.clone());
+                    // XXX(rsw) no support for generics in calls yet
+                    if c.explicit_generics.is_some() {
+                        self.err("generic calls not yet supported", &c.span);
+                    }
                     let args = c
+                        .arguments
                         .expressions
                         .iter()
                         .map(|e| self.expr(e))
@@ -705,12 +715,13 @@ impl<'ast> ZGen<'ast> {
         use petgraph::graph::{DiGraph, NodeIndex, DefaultIx};
         use petgraph::algo::toposort;
         use petgraph::dot::{Dot, Config};
+        let asts = std::mem::take(&mut self.asts);
 
         // we use the graph to toposort the includes and the map to go from PathBuf to NodeIdx
-        let mut ig = DiGraph::<PathBuf, ()>::with_capacity(self.asts.len(), self.asts.len());
-        let mut gn = HashMap::<PathBuf, NodeIndex<DefaultIx>>::with_capacity(self.asts.len());
+        let mut ig = DiGraph::<PathBuf, ()>::with_capacity(asts.len(), asts.len());
+        let mut gn = HashMap::<PathBuf, NodeIndex<DefaultIx>>::with_capacity(asts.len());
 
-        for (p, f) in self.asts.iter() {
+        for (p, f) in asts.iter() {
             self.file_stack.push(p.to_owned());
             if !gn.contains_key(p) {
                 gn.insert(p.to_owned(), ig.add_node(p.to_owned()));
@@ -770,6 +781,7 @@ impl<'ast> ZGen<'ast> {
 
             self.file_stack.pop();
         }
+        self.asts = asts;
 
         toposort(&ig, None)
             .unwrap_or_else(|e| {
