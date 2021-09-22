@@ -780,10 +780,11 @@ impl<'ast> ZGen<'ast> {
         self.flatten_import_map();
 
         let t = std::mem::take(&mut self.asts);
-        for (p, f) in files.iter().map(|p| (p, t.get(p).unwrap())) {
+        for p in files.iter() {
             self.file_stack.push(p.to_owned());
             self.constants.insert(self.cur_path().to_owned(), HashMap::new());
-            for d in f.declarations.iter() {
+            // XXX(rsw) retain() declarations instead? if we don't need them, saves allocs
+            for d in t.get(p).unwrap().declarations.iter() {
                 match d {
                     ast::SymbolDeclaration::Import(_) => (), // already visited in visit_includes()
                     ast::SymbolDeclaration::Constant(c) => self.const_decl_(c),
@@ -837,6 +838,7 @@ impl<'ast> ZGen<'ast> {
             }
 
             for d in f.declarations.iter() {
+                // XXX(rsw) retain() declarations instead? if we don't need them, saves allocs
                 if let ast::SymbolDeclaration::Import(i) = d {
                     let (src_path, src_names, dst_names) = match i {
                         ast::ImportDirective::Main(m) => (
