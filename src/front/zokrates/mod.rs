@@ -641,7 +641,7 @@ impl<'ast> ZGen<'ast> {
         p
     }
     fn deref_import(&self, s: String) -> (PathBuf, String) {
-        // XXX(rsw) don't we need to chase this through multiple indirections?
+        // import map is flattened, so we only need to chase through at most one indirection
         let r = (self.cur_path().to_path_buf(), s);
         self.import_map.get(&r).cloned().unwrap_or(r)
     }
@@ -669,19 +669,11 @@ impl<'ast> ZGen<'ast> {
             }
             ast::Expression::Identifier(i) => {
                 // chase imports
-                let mut path_id = (self.cur_path().to_path_buf(), i.value.clone());
-                loop {
-                    // chase (path, id) as an import
-                    if let Some((p, i)) = self.import_map.get(&path_id) {
-                        path_id = (p.to_path_buf(), i.clone());
-                    } else {
-                        let (path, id) = path_id;
-                        if let Some(val) = self.constants.get(&path).unwrap().get(&id) {
-                            return val.clone();
-                        } else {
-                            self.err("Undefined const identifier", &i.span);
-                        }
-                    }
+                let (path, id) = self.deref_import(i.value.clone());
+                if let Some(val) = self.constants.get(&path).unwrap().get(&id) {
+                    val.clone()
+                } else {
+                    self.err("Undefined const identifier", &i.span)
                 }
             }
             ast::Expression::Literal(l) => self.literal_(l),
@@ -707,7 +699,7 @@ impl<'ast> ZGen<'ast> {
 
     fn const_decl_(&mut self, c: &ast::ConstantDefinition<'ast>) {
         // make sure that this wasn't already an important const name
-        if self.import_map.get(&(self.cur_path().to_path_buf(), c.id.value.clone())).is_some() {
+        if self.import_map.contains_key(&(self.cur_path().to_path_buf(), c.id.value.clone())) {
             self.err(format!("Constant {} redefined after import", &c.id.value), &c.span);
         }
 
@@ -753,9 +745,40 @@ impl<'ast> ZGen<'ast> {
         }
     }
 
+    fn flatten_import_map(&mut self) {
+        let mut new_map = HashMap::with_capacity(self.import_map.len());
+
+        let mut visited = Vec::new();
+        for (key, val) in &self.import_map {
+            // may have visited this value already as part of a prior pointer chase
+            if new_map.contains_key(key) {
+                continue;
+            }
+
+            // chase the pointer, writing down every visited key along the way
+            visited.clear();
+            visited.push(key);
+            let mut v = val;
+            while let Some(vv) = self.import_map.get(v) {
+                visited.push(v);
+                v = vv;
+            }
+
+            // map every visited key to the final value in the ptr chase
+            visited.iter().for_each(|&k| {
+                new_map.insert(k.clone(), v.clone());
+            });
+        }
+
+        self.import_map = new_map;
+    }
+
     fn visit_files(&mut self) {
         // first, go through includes and return a toposorted visit order for remaining processing
         let files = self.visit_includes();
+        // rewrite import map by flattening multi-hop imports
+        self.flatten_import_map();
+
         let t = std::mem::take(&mut self.asts);
         for (p, f) in files.iter().map(|p| (p, t.get(p).unwrap())) {
             self.file_stack.push(p.to_owned());
@@ -763,10 +786,7 @@ impl<'ast> ZGen<'ast> {
             for d in f.declarations.iter() {
                 match d {
                     ast::SymbolDeclaration::Import(_) => (), // already visited in visit_includes()
-                    ast::SymbolDeclaration::Constant(c) => {
-                        // constant defns: need to add global defs (in self.circ?) and use to eval
-                        self.const_decl_(c);
-                    }
+                    ast::SymbolDeclaration::Constant(c) => self.const_decl_(c),
                     ast::SymbolDeclaration::Struct(s) => {
                         /*
                         let ty = Ty::Struct(
