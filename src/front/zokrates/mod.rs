@@ -96,7 +96,7 @@ struct ZGen<'ast> {
     file_stack: Vec<PathBuf>,
     functions: HashMap<(PathBuf, String), ast::FunctionDefinition<'ast>>,
     structs: HashMap<(PathBuf, String), ast::StructDefinition<'ast>>,
-    constants: HashMap<(PathBuf, String), T>,
+    constants: HashMap<PathBuf, HashMap<String, T>>,
     import_map: HashMap<(PathBuf, String), (PathBuf, String)>,
     mode: Mode,
 }
@@ -297,7 +297,7 @@ impl<'ast> ZGen<'ast> {
         )
     }
 
-    fn literal_(&mut self, e: &ast::LiteralExpression<'ast>) -> T {
+    fn literal_(&self, e: &ast::LiteralExpression<'ast>) -> T {
         match e {
             ast::LiteralExpression::DecimalLiteral(d) => {
                 let vstr = &d.value.span.as_str();
@@ -651,6 +651,83 @@ impl<'ast> ZGen<'ast> {
         self.unwrap(i, e.span()).to_isize().unwrap()
     }
 
+    fn const_expr_(&self, e: &ast::Expression<'ast>) -> T {
+        match e {
+            ast::Expression::Binary(b) => {
+                let left = self.const_expr_(&b.left);
+                let right = self.const_expr_(&b.right);
+                if left.type_() != right.type_() {
+                    self.err("Type mismatch in const-def binop", &b.span);
+                }
+                let op = self.bin_op(&b.op);
+                op(left, right).unwrap_or_else(|e| self.err(e, &b.span))
+            }
+            ast::Expression::Unary(u) => {
+                let arg = self.const_expr_(&u.expression);
+                let op = self.unary_op(&u.op);
+                op(arg).unwrap_or_else(|e| self.err(e, &u.span))
+            }
+            ast::Expression::Identifier(i) => {
+                // chase imports
+                let mut path_id = (self.cur_path().to_path_buf(), i.value.clone());
+                loop {
+                    // chase (path, id) as an import
+                    if let Some((p, i)) = self.import_map.get(&path_id) {
+                        path_id = (p.to_path_buf(), i.clone());
+                    } else {
+                        let (path, id) = path_id;
+                        if let Some(val) = self.constants.get(&path).unwrap().get(&id) {
+                            return val.clone();
+                        } else {
+                            self.err("Undefined const identifier", &i.span);
+                        }
+                    }
+                }
+            }
+            ast::Expression::Literal(l) => self.literal_(l),
+            _ => self.err(
+                "Constant expressions must contain only Unary, Binary, Identifier, Literal",
+                e.span()
+            ),
+        }
+    }
+
+    fn const_type_(&self, c: &ast::ConstantDefinition<'ast>) -> Ty {
+        // XXX(rsw) consts must be Basic type
+        match &c.ty {
+            ast::Type::Basic(ast::BasicType::U8(_)) => Ty::Uint(8),
+            ast::Type::Basic(ast::BasicType::U16(_)) => Ty::Uint(16),
+            ast::Type::Basic(ast::BasicType::U32(_)) => Ty::Uint(32),
+            ast::Type::Basic(ast::BasicType::U64(_)) => Ty::Uint(64),
+            ast::Type::Basic(ast::BasicType::Boolean(_)) => Ty::Bool,
+            ast::Type::Basic(ast::BasicType::Field(_)) => Ty::Field,
+            _ => self.err("Array and Struct constants not supported", &c.span),
+        }
+    }
+
+    fn const_decl_(&mut self, c: &ast::ConstantDefinition<'ast>) {
+        // make sure that this wasn't already an important const name
+        if self.import_map.get(&(self.cur_path().to_path_buf(), c.id.value.clone())).is_some() {
+            self.err(format!("Constant {} redefined after import", &c.id.value), &c.span);
+        }
+
+        // evaluate
+        let name = c.id.value.clone();
+        let ctype = self.const_type_(&c);
+        let value = self.const_expr_(&c.expression);
+        if ctype != value.type_() {
+            self.err("Type mismatch in constant definition", &c.span);
+        }
+
+        // insert into constant map
+        let mut constants = std::mem::take(&mut self.constants); // borrow checker argh
+        let path = self.cur_path();
+        if constants.get_mut(path).unwrap().insert(name, value).is_some() {
+            self.err(format!("Constant {} redefined", &c.id.value), &c.span);
+        }
+        self.constants = constants;
+    }
+
     fn type_(&mut self, t: &ast::Type<'ast>) -> Ty {
         fn lift<'ast>(t: &ast::BasicOrStructType<'ast>) -> ast::Type<'ast> {
             match t {
@@ -682,11 +759,13 @@ impl<'ast> ZGen<'ast> {
         let t = std::mem::take(&mut self.asts);
         for (p, f) in files.iter().map(|p| (p, t.get(p).unwrap())) {
             self.file_stack.push(p.to_owned());
+            self.constants.insert(self.cur_path().to_owned(), HashMap::new());
             for d in f.declarations.iter() {
                 match d {
-                    ast::SymbolDeclaration::Import(_) => (),
+                    ast::SymbolDeclaration::Import(_) => (), // already visited in visit_includes()
                     ast::SymbolDeclaration::Constant(c) => {
                         // constant defns: need to add global defs (in self.circ?) and use to eval
+                        self.const_decl_(c);
                     }
                     ast::SymbolDeclaration::Struct(s) => {
                         /*
