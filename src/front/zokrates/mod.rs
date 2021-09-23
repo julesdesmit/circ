@@ -677,6 +677,18 @@ impl<'ast> ZGen<'ast> {
                 }
             }
             ast::Expression::Literal(l) => self.literal_(l),
+            ast::Expression::InlineArray(ia) => {
+                // TODO(rsw)
+                unimplemented!()
+            }
+            ast::Expression::ArrayInitializer(ai) => {
+                // TODO?(rsw)
+                unimplemented!()
+            }
+            ast::Expression::Postfix(p) => {
+                // TODO?(rsw)
+                unimplemented!()
+            }
             _ => self.err(
                 "Constant expressions must contain only Unary, Binary, Identifier, Literal",
                 e.span()
@@ -684,16 +696,13 @@ impl<'ast> ZGen<'ast> {
         }
     }
 
-    fn const_type_(&self, c: &ast::ConstantDefinition<'ast>) -> Ty {
-        // XXX(rsw) consts must be Basic type
-        match &c.ty {
-            ast::Type::Basic(ast::BasicType::U8(_)) => Ty::Uint(8),
-            ast::Type::Basic(ast::BasicType::U16(_)) => Ty::Uint(16),
-            ast::Type::Basic(ast::BasicType::U32(_)) => Ty::Uint(32),
-            ast::Type::Basic(ast::BasicType::U64(_)) => Ty::Uint(64),
-            ast::Type::Basic(ast::BasicType::Boolean(_)) => Ty::Bool,
-            ast::Type::Basic(ast::BasicType::Field(_)) => Ty::Field,
-            _ => self.err("Array and Struct constants not supported", &c.span),
+    fn const_type_(&mut self, c: &ast::ConstantDefinition<'ast>) -> Ty {
+        // XXX(rsw) consts must be Basic or Array type
+        let ty = self.type_(&c.ty);
+        if let Ty::Struct(_, _) = ty {
+            self.err("Struct constants not supported", &c.span)
+        } else {
+            ty
         }
     }
 
