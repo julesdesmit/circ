@@ -728,7 +728,7 @@ impl<'ast> ZGen<'ast> {
                 self.unwrap(res, &p.span)
             }
             _ => self.err(
-                "Constant expressions must contain only Unary, Binary, Identifier, Literal",
+                "Unsupported expression in const definition. Unary, Binary, Identifier, Literal, InlineArray, ArrayInitializer, Postfix allowed.",
                 e.span()
             ),
         }
