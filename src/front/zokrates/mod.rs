@@ -317,7 +317,8 @@ impl<'ast> ZGen<'ast> {
                     Some(ast::DecimalSuffix::Field(_)) => {
                         T::Field(pf_lit(Integer::from_str_radix(vstr, 10).unwrap()))
                     }
-                    // XXX(rsw) need to infer int size from context. yuck. error out.
+                    // XXX(rsw) need to infer int size from context. yuck.
+                    // TODO return a T::Uint(0, Term::Integer), unify up the tree?
                     _ => self.err("Refusing to infer literal type. Annotation needed.", &d.span),
                 }
             }
@@ -651,6 +652,19 @@ impl<'ast> ZGen<'ast> {
         self.unwrap(i, e.span()).to_isize().unwrap()
     }
 
+    fn const_identifier_(&self, i: &ast::IdentifierExpression<'ast>) -> T {
+        let (path, id) = self.deref_import(i.value.clone());
+        if let Some(val) = self.constants.get(&path).unwrap().get(&id) {
+            val.clone()
+        } else {
+            self.err("Undefined const identifier", &i.span)
+        }
+    }
+
+    fn const_usize_(&self, e: &ast::Expression<'ast>) -> usize {
+        self.unwrap(const_int(self.const_expr_(e)), e.span()).to_usize().unwrap()
+    }
+
     fn const_expr_(&self, e: &ast::Expression<'ast>) -> T {
         match e {
             ast::Expression::Binary(b) => {
@@ -667,27 +681,51 @@ impl<'ast> ZGen<'ast> {
                 let op = self.unary_op(&u.op);
                 op(arg).unwrap_or_else(|e| self.err(e, &u.span))
             }
-            ast::Expression::Identifier(i) => {
-                // chase imports
-                let (path, id) = self.deref_import(i.value.clone());
-                if let Some(val) = self.constants.get(&path).unwrap().get(&id) {
-                    val.clone()
-                } else {
-                    self.err("Undefined const identifier", &i.span)
-                }
-            }
+            ast::Expression::Identifier(i) => self.const_identifier_(i),
             ast::Expression::Literal(l) => self.literal_(l),
             ast::Expression::InlineArray(ia) => {
-                // TODO(rsw)
-                unimplemented!()
+                let mut avals = Vec::with_capacity(ia.expressions.len());
+                ia.expressions.iter().for_each(|ee| match ee {
+                    ast::SpreadOrExpression::Expression(eee) => avals.push(self.const_expr_(eee)),
+                    ast::SpreadOrExpression::Spread(s) => avals.append(
+                        &mut self.unwrap(
+                            self.const_expr_(&s.expression).unwrap_array(),
+                            s.expression.span()
+                        )
+                    ),
+                });
+                self.unwrap(T::new_array(avals), e.span())
             }
             ast::Expression::ArrayInitializer(ai) => {
-                // TODO?(rsw)
-                unimplemented!()
+                let val = self.const_expr_(&ai.value);
+                let num = self.const_usize_(&ai.count);
+                T::Array(val.type_(), vec![val; num])
             }
             ast::Expression::Postfix(p) => {
-                // TODO?(rsw)
-                unimplemented!()
+                // make sure all accesses are Select, not Member or Call
+                let mut acc = Vec::with_capacity(p.accesses.len());
+                p.accesses.iter().try_for_each(|a| match a {
+                    ast::Access::Call(c) => Err((
+                            "Function calls not supported in const definitions",
+                            &c.span
+                        )),
+                    ast::Access::Member(m) => Err((
+                            "Struct member accesses not supported in const definitions",
+                            &m.span
+                        )),
+                    ast::Access::Select(s) => Ok(acc.push(&s.expression)),
+                })
+                .unwrap_or_else(|(m, s)| self.err(m, s));
+                let arr = self.const_identifier_(&p.id);
+                let res = acc.iter().fold(Ok(arr), |arr, acc| match acc {
+                    ast::RangeOrExpression::Expression(e) => array_select(arr?, self.const_expr_(e)),
+                    ast::RangeOrExpression::Range(r) => {
+                        let start = r.from.as_ref().map(|s| self.const_usize_(&s.0));
+                        let end = r.to.as_ref().map(|s| self.const_usize_(&s.0));
+                        slice(arr?, start, end)
+                    }
+                });
+                self.unwrap(res, &p.span)
             }
             _ => self.err(
                 "Constant expressions must contain only Unary, Binary, Identifier, Literal",
