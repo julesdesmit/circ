@@ -96,7 +96,7 @@ struct ZGen<'ast> {
     file_stack: Vec<PathBuf>,
     functions: HashMap<(PathBuf, String), ast::FunctionDefinition<'ast>>,
     structs: HashMap<(PathBuf, String), ast::StructDefinition<'ast>>,
-    constants: HashMap<PathBuf, HashMap<String, T>>,
+    constants: HashMap<(PathBuf, String), T>,
     import_map: HashMap<(PathBuf, String), (PathBuf, String)>,
     mode: Mode,
 }
@@ -170,7 +170,7 @@ impl<'ast> ZGen<'ast> {
         debug!("Stmt: {}", s.span().as_str());
         match s {
             ast::Statement::Return(r) => {
-                // XXX(rsw) multi-return unimplemented
+                // XXX(unimpl) multi-return unimplemented
                 assert!(r.expressions.len() <= 1);
                 if let Some(e) = r.expressions.first() {
                     let ret = self.expr(e);
@@ -216,7 +216,7 @@ impl<'ast> ZGen<'ast> {
                 self.circ.exit_scope();
             }
             ast::Statement::Definition(d) => {
-                // XXX(rsw) multi-assignment unimplemented
+                // XXX(unimpl) multi-assignment unimplemented
                 assert!(d.lhs.len() <= 1);
                 let e = self.expr(&d.expression);
                 if let Some(l) = d.lhs.first() {
@@ -317,7 +317,7 @@ impl<'ast> ZGen<'ast> {
                     Some(ast::DecimalSuffix::Field(_)) => {
                         T::Field(pf_lit(Integer::from_str_radix(vstr, 10).unwrap()))
                     }
-                    // XXX(rsw) need to infer int size from context. yuck.
+                    // XXX(unimpl) need to infer int size from context. yuck.
                     // TODO return a T::Uint(0, Term::Integer), unify up the tree?
                     _ => self.err("Refusing to infer literal type. Annotation needed.", &d.span),
                 }
@@ -435,7 +435,7 @@ impl<'ast> ZGen<'ast> {
                 let (base, accs) = if let Some(ast::Access::Call(c)) = p.accesses.first() {
                     debug!("Call: {}", p.id.value);
                     let (f_path, f_name) = self.deref_import(p.id.value.clone());
-                    // XXX(rsw) no support for generics in calls yet
+                    // XXX(unimpl) no support for generics in calls yet
                     if c.explicit_generics.is_some() {
                         self.err("generic calls not yet supported", &c.span);
                     }
@@ -513,13 +513,13 @@ impl<'ast> ZGen<'ast> {
     fn entry_fn(&mut self, n: &str) {
         debug!("Entry: {}", n);
         // find the entry function
-        let (f_path, f_name) = self.deref_import(n.to_owned());
-        let p = (f_path, f_name);
+        let p = self.deref_import(n.to_owned());
         let f = self
             .functions
             .get(&p)
             .unwrap_or_else(|| panic!("No function '{}'", p.1))
             .clone();
+        // XXX(unimpl) tuple returns not supported
         assert!(f.returns.len() <= 1);
         // get return type
         let ret_ty = f.returns.first().map(|r| self.type_(r));
@@ -653,8 +653,7 @@ impl<'ast> ZGen<'ast> {
     }
 
     fn const_identifier_(&self, i: &ast::IdentifierExpression<'ast>) -> T {
-        let (path, id) = self.deref_import(i.value.clone());
-        if let Some(val) = self.constants.get(&path).unwrap().get(&id) {
+        if let Some(val) = self.constants.get(&self.deref_import(i.value.clone())) {
             val.clone()
         } else {
             self.err("Undefined const identifier", &i.span)
@@ -735,7 +734,7 @@ impl<'ast> ZGen<'ast> {
     }
 
     fn const_type_(&mut self, c: &ast::ConstantDefinition<'ast>) -> Ty {
-        // XXX(rsw) consts must be Basic or Array type
+        // XXX(unimpl) consts must be Basic or Array type
         let ty = self.type_(&c.ty);
         if let Ty::Struct(_, _) = ty {
             self.err("Struct constants not supported", &c.span)
@@ -745,6 +744,7 @@ impl<'ast> ZGen<'ast> {
     }
 
     fn const_decl_(&mut self, c: &ast::ConstantDefinition<'ast>) {
+        debug!("Const decl: {}", c.span.as_str());
         // make sure that this wasn't already an important const name
         if self.import_map.contains_key(&(self.cur_path().to_path_buf(), c.id.value.clone())) {
             self.err(format!("Constant {} redefined after import", &c.id.value), &c.span);
@@ -759,12 +759,10 @@ impl<'ast> ZGen<'ast> {
         }
 
         // insert into constant map
-        let mut constants = std::mem::take(&mut self.constants); // borrow checker argh
-        let path = self.cur_path();
-        if constants.get_mut(path).unwrap().insert(name, value).is_some() {
+        let path = self.cur_path().to_owned();
+        if self.constants.insert((path, name), value).is_some() {
             self.err(format!("Constant {} redefined", &c.id.value), &c.span);
         }
-        self.constants = constants;
     }
 
     fn type_(&mut self, t: &ast::Type<'ast>) -> Ty {
@@ -829,8 +827,7 @@ impl<'ast> ZGen<'ast> {
         let t = std::mem::take(&mut self.asts);
         for p in files.iter() {
             self.file_stack.push(p.to_owned());
-            self.constants.insert(self.cur_path().to_owned(), HashMap::new());
-            // XXX(rsw) retain() declarations instead? if we don't need them, saves allocs
+            // XXX(opt) retain() declarations instead? if we don't need them, saves allocs
             for d in t.get(p).unwrap().declarations.iter() {
                 match d {
                     ast::SymbolDeclaration::Import(_) => (), // already visited in visit_includes()
@@ -871,7 +868,6 @@ impl<'ast> ZGen<'ast> {
     fn visit_includes(&mut self) -> Vec<PathBuf> {
         use petgraph::graph::{DiGraph, NodeIndex, DefaultIx};
         use petgraph::algo::toposort;
-        use petgraph::dot::{Dot, Config};
         let asts = std::mem::take(&mut self.asts);
 
         // we use the graph to toposort the includes and the map to go from PathBuf to NodeIdx
@@ -885,7 +881,7 @@ impl<'ast> ZGen<'ast> {
             }
 
             for d in f.declarations.iter() {
-                // XXX(rsw) retain() declarations instead? if we don't need them, saves allocs
+                // XXX(opt) retain() declarations instead? if we don't need them, saves allocs
                 if let ast::SymbolDeclaration::Import(i) = d {
                     let (src_path, src_names, dst_names) = match i {
                         ast::ImportDirective::Main(m) => (
@@ -943,6 +939,7 @@ impl<'ast> ZGen<'ast> {
 
         toposort(&ig, None)
             .unwrap_or_else(|e| {
+                use petgraph::dot::{Dot, Config};
                 panic!("Import graph is cyclic!: {:?}\n{:?}\n",
                        e,
                        Dot::with_config(&ig, &[Config::EdgeNoLabel]))
