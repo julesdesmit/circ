@@ -83,7 +83,9 @@ impl FrontEnd for Zokrates {
         let mut g = ZGen::new(i.inputs, asts, i.mode);
         g.visit_files();
         g.file_stack.push(i.file);
+        g.generics_stack.push(HashMap::new());
         g.entry_fn("main");
+        g.generics_stack.pop();
         g.file_stack.pop();
         g.circ.consume().borrow().clone()
     }
@@ -94,6 +96,7 @@ struct ZGen<'ast> {
     stdlib: parser::ZStdLib,
     asts: HashMap<PathBuf, ast::File<'ast>>,
     file_stack: Vec<PathBuf>,
+    generics_stack: Vec<HashMap<String, T>>,
     functions: HashMap<(PathBuf, String), ast::FunctionDefinition<'ast>>,
     structs: HashMap<(PathBuf, String), ast::StructDefinition<'ast>>,
     constants: HashMap<(PathBuf, String), T>,
@@ -123,11 +126,12 @@ impl<'ast> ZGen<'ast> {
             circ: Circify::new(ZoKrates::new(inputs.map(|i| parser::parse_inputs(i)))),
             asts,
             stdlib: parser::ZStdLib::new(),
-            file_stack: vec![],
-            functions: HashMap::default(),
-            structs: HashMap::default(),
-            constants: HashMap::default(),
-            import_map: HashMap::default(),
+            file_stack: Vec::new(),
+            generics_stack: Vec::new(),
+            functions: HashMap::new(),
+            structs: HashMap::new(),
+            constants: HashMap::new(),
+            import_map: HashMap::new(),
             mode,
         };
         this.circ
@@ -400,15 +404,30 @@ impl<'ast> ZGen<'ast> {
                 let a = self.expr(&u.expression);
                 f(a)
             }
-            ast::Expression::Identifier(u) => Ok(self
-               .unwrap(self.circ.get_value(Loc::local(u.value.clone())), &u.span)
-               .unwrap_term()),
-            ast::Expression::InlineArray(u) => T::new_array(
-                u.expressions
-                    .iter()
-                    .flat_map(|x| self.array_lit_elem(x))
-                    .collect(),
-            ),
+            ast::Expression::Identifier(u) => {
+                if let Some(v) = self.generic_lookup_(&u.value) {
+                    Ok(v.clone())
+                } else if let Some(v) = self.const_lookup_(&u.value) {
+                    Ok(v.clone())
+                } else {
+                    Ok(self
+                       .unwrap(self
+                               .circ
+                               .get_value(Loc::local(u.value.clone())), &u.span)
+                       .unwrap_term())
+                }
+            }
+            ast::Expression::InlineArray(u) => {
+                let mut avals = Vec::with_capacity(u.expressions.len());
+                u.expressions.iter().for_each(|ee| match ee {
+                    ast::SpreadOrExpression::Expression(eee) => avals.push(self.expr(eee)),
+                    ast::SpreadOrExpression::Spread(s) => {
+                        let arr = self.expr(&s.expression).unwrap_array();
+                        avals.append(&mut self.unwrap(arr, s.expression.span()));
+                    }
+                });
+                T::new_array(avals)
+            }
             ast::Expression::Literal(l) => Ok(self.literal_(l)),
             ast::Expression::InlineStruct(u) => Ok(T::Struct(
                 u.ty.value.clone(),
@@ -421,12 +440,6 @@ impl<'ast> ZGen<'ast> {
                 let v = self.expr(&a.value);
                 let ty = v.type_();
                 let n = self.const_int(&a.count) as usize;
-                /*
-                let n = const_int(self.const_(&a.count))
-                    .unwrap()
-                    .to_usize()
-                    .unwrap();
-                */
                 Ok(T::Array(ty, vec![v; n]))
             }
             ast::Expression::Postfix(p) => {
@@ -435,10 +448,6 @@ impl<'ast> ZGen<'ast> {
                 let (base, accs) = if let Some(ast::Access::Call(c)) = p.accesses.first() {
                     debug!("Call: {}", p.id.value);
                     let (f_path, f_name) = self.deref_import(p.id.value.clone());
-                    // XXX(unimpl) no support for generics in calls yet
-                    if c.explicit_generics.is_some() {
-                        self.err("generic calls not yet supported", &c.span);
-                    }
                     let args = c
                         .arguments
                         .expressions
@@ -446,15 +455,52 @@ impl<'ast> ZGen<'ast> {
                         .map(|e| self.expr(e))
                         .collect::<Vec<_>>();
                     let res = if f_path.to_string_lossy().starts_with("EMBED") {
+                        // builtins have no generics
+                        if !c.explicit_generics
+                            .as_ref()
+                            .map(|g| g.values.is_empty())
+                            .unwrap_or(true) {
+                            self.err("generic builtins not supported", &c.span);
+                        }
                         Self::builtin_call(f_path.to_str().unwrap(), args).unwrap()
                     } else {
                         let p = (f_path, f_name);
-                        let f = self
-                            .functions
+                        let f = self.functions
                             .get(&p)
                             .unwrap_or_else(|| panic!("No function '{}'", p.1))
                             .clone();
+                        if f.generics.len() !=
+                            c.explicit_generics.as_ref().map(|g| g.values.len()).unwrap_or(0) {
+                            self.err("cannot determine generic params for function call", &c.span);
+                        }
                         self.file_stack.push(p.0);
+                        self.generics_stack.push(c.explicit_generics.as_ref()
+                            .map(|g| g.values
+                                 .iter()
+                                 .zip(&f.generics[..])
+                                 .map(|(cgv, n)| match cgv {
+                                     ast::ConstantGenericValue::Value(l) => {
+                                         (n.value.clone(), self.literal_(&l))
+                                     }
+                                     ast::ConstantGenericValue::Identifier(i) => {
+                                         if let Some(v) = self.generic_lookup_(&i.value) {
+                                             (n.value.clone(), v.clone())
+                                         } else if let Some(v) = self.const_lookup_(&i.value) {
+                                             (n.value.clone(), v.clone())
+                                         } else {
+                                             self.err(format!(
+                                                     "no const {} in current context",
+                                                     &i.value),
+                                                     &i.span);
+                                         }
+                                     }
+                                     ast::ConstantGenericValue::Underscore(u) => {
+                                         self.err("cannot resolve generic argument", &u.span);
+                                     }
+                                 })
+                                 .collect())
+                            .unwrap_or_else(|| HashMap::new()));
+                        // XXX(unimpl) tuple returns not supported
                         assert!(f.returns.len() <= 1);
                         let ret_ty = f.returns.first().map(|r| self.type_(r));
                         self.circ.enter_fn(p.1, ret_ty);
@@ -473,6 +519,7 @@ impl<'ast> ZGen<'ast> {
                             .exit_fn()
                             .map(|a| a.unwrap_term())
                             .unwrap_or_else(|| Self::const_bool(false));
+                        self.generics_stack.pop();
                         self.file_stack.pop();
                         ret
                     };
@@ -504,12 +551,6 @@ impl<'ast> ZGen<'ast> {
         };
         self.unwrap(res, e.span())
     }
-    fn array_lit_elem(&mut self, e: &ast::SpreadOrExpression<'ast>) -> Vec<T> {
-        match e {
-            ast::SpreadOrExpression::Expression(e) => vec![self.expr(e)],
-            ast::SpreadOrExpression::Spread(s) => self.expr(&s.expression).unwrap_array().unwrap(),
-        }
-    }
     fn entry_fn(&mut self, n: &str) {
         debug!("Entry: {}", n);
         // find the entry function
@@ -521,6 +562,8 @@ impl<'ast> ZGen<'ast> {
             .clone();
         // XXX(unimpl) tuple returns not supported
         assert!(f.returns.len() <= 1);
+        // XXX(unimpl) main() cannot be generic
+        assert!(f.generics.is_empty());
         // get return type
         let ret_ty = f.returns.first().map(|r| self.type_(r));
         // setup stack frame for entry function
@@ -652,8 +695,16 @@ impl<'ast> ZGen<'ast> {
         self.unwrap(i, e.span()).to_isize().unwrap()
     }
 
+    fn generic_lookup_(&self, i: &str) -> Option<&T> {
+        self.generics_stack.last().unwrap().get(i)
+    }
+
+    fn const_lookup_(&self, i: &str) -> Option<&T> {
+        self.constants.get(&self.deref_import(i.to_string()))
+    }
+
     fn const_identifier_(&self, i: &ast::IdentifierExpression<'ast>) -> T {
-        if let Some(val) = self.constants.get(&self.deref_import(i.value.clone())) {
+        if let Some(val) = self.const_lookup_(i.value.as_ref()) {
             val.clone()
         } else {
             self.err("Undefined const identifier", &i.span)
