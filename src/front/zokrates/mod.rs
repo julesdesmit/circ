@@ -202,15 +202,8 @@ impl<'ast> ZGen<'ast> {
                     self.circ.enter_scope();
                     let ass_res = self
                         .circ
-                        .assign(Loc::local(v_name.clone()), Val::Term(
-                            match ty {
-                                Ty::Uint(8) => T::Uint(8, bv_lit(j, 8)),
-                                Ty::Uint(16) => T::Uint(16, bv_lit(j, 16)),
-                                Ty::Uint(32) => T::Uint(32, bv_lit(j, 32)),
-                                Ty::Field =>  T::Field(pf_lit(j)),
-                                _ => panic!("Unexpected type for iteration: {:?}", ty),
-                            }
-                        ));
+                        // XXX(rsw) does this assignment cast correctly?
+                        .assign(Loc::local(v_name.clone()), Val::Term(T::Field(pf_lit(j))));
                     self.unwrap(ass_res, &i.index.span);
                     for s in &i.statements {
                         self.stmt(s);
@@ -563,7 +556,9 @@ impl<'ast> ZGen<'ast> {
         // XXX(unimpl) tuple returns not supported
         assert!(f.returns.len() <= 1);
         // XXX(unimpl) main() cannot be generic
-        assert!(f.generics.is_empty());
+        if !f.generics.is_empty() {
+            self.err("Entry function cannot be generic. Try adding a wrapper function that supplies an explicit generic argument.", &f.span);
+        }
         // get return type
         let ret_ty = f.returns.first().map(|r| self.type_(r));
         // setup stack frame for entry function
