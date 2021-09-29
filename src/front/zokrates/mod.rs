@@ -884,6 +884,8 @@ impl<'ast> ZGen<'ast> {
         let files = self.visit_includes();
         // rewrite import map by flattening multi-hop imports
         self.flatten_import_map();
+        // simple typing pass for decimal literals
+        self.visit_literals();
 
         let t = std::mem::take(&mut self.asts);
         for p in files.iter() {
@@ -1006,5 +1008,44 @@ impl<'ast> ZGen<'ast> {
                        Dot::with_config(&ig, &[Config::EdgeNoLabel]))
             })
             .iter().map(|idx| std::mem::take(ig.node_weight_mut(*idx).unwrap())).collect()
+    }
+
+    fn vl_function_(&self, f: &mut ast::FunctionDefinition<'ast>) {
+    }
+
+    fn vl_constant_(&self, c: &mut ast::ConstantDefinition<'ast>) {
+        self.vl_type_(&mut c.ty);
+        self.vl_expression_as_(&mut c.expression, &c.ty);
+    }
+
+    fn vl_expression_as_(&self, e: &mut ast::Expression<'ast>, t: &ast::Type<'ast>) {
+    }
+
+    fn vl_type_(&self, t: &mut ast::Type<'ast>) {
+        match t {
+            ast::Type::Basic(_) => (),
+            ast::Type::Struct(s) => (),
+            ast::Type::Array(a) => (),
+        }
+    }
+
+    fn vl_struct_(&self, s: &mut ast::StructDefinition<'ast>) {
+        // StructDefinition
+        //   - fields: StructField
+        //       - ty: Type
+        s.fields.iter_mut().for_each(|f| self.vl_type_(&mut f.ty));
+    }
+
+    fn visit_literals(&mut self) {
+        let mut asts = std::mem::take(&mut self.asts);
+        for a in asts.values_mut() {
+            a.declarations.iter_mut().for_each(|d| match d {
+                ast::SymbolDeclaration::Import(_) => (),
+                ast::SymbolDeclaration::Function(f) => self.vl_function_(f),
+                ast::SymbolDeclaration::Constant(c) => self.vl_constant_(c),
+                ast::SymbolDeclaration::Struct(s) => self.vl_struct_(s),
+            });
+        }
+        self.asts = asts;
     }
 }
