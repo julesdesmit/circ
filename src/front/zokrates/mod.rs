@@ -781,11 +781,26 @@ impl<'ast> ZGen<'ast> {
 
     fn const_type_(&mut self, c: &ast::ConstantDefinition<'ast>) -> Ty {
         // XXX(unimpl) consts must be Basic or Array type
-        let ty = self.type_(&c.ty);
-        if let Ty::Struct(_, _) = ty {
-            self.err("Struct constants not supported", &c.span)
-        } else {
-            ty
+        match &c.ty {
+            ast::Type::Basic(ast::BasicType::U8(_)) => Ty::Uint(8),
+            ast::Type::Basic(ast::BasicType::U16(_)) => Ty::Uint(16),
+            ast::Type::Basic(ast::BasicType::U32(_)) => Ty::Uint(32),
+            ast::Type::Basic(ast::BasicType::U64(_)) => Ty::Uint(64),
+            ast::Type::Basic(ast::BasicType::Boolean(_)) => Ty::Bool,
+            ast::Type::Basic(ast::BasicType::Field(_)) => Ty::Field,
+            ast::Type::Array(a) => {
+                let b = if let ast::BasicOrStructType::Basic(b) = &a.ty {
+                    let tmp = ast::Type::Basic(b.clone());
+                    self.type_(&tmp)
+                } else {
+                    self.err("Struct consts not supported", &a.span)
+                };
+                a.dimensions
+                    .iter()
+                    .map(|d| self.const_usize_(d))
+                    .fold(b, |b, d| Ty::Array(d, Box::new(b)))
+            }
+            ast::Type::Struct(_) => self.err("Struct consts not supported", &c.span),
         }
     }
 
