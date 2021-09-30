@@ -63,7 +63,7 @@ pub trait ZVisitorMut<'ast>: Sized {
     }
 
     fn visit_parameter(&mut self, param: &mut ast::Parameter<'ast>) {
-        walk_parameter(self,  param);
+        walk_parameter(self, param);
     }
 
     fn visit_visibility(&mut self, vis: &mut ast::Visibility<'ast>) {
@@ -248,6 +248,22 @@ pub trait ZVisitorMut<'ast>: Sized {
         walk_array_access(self, aa);
     }
 
+    fn visit_range_or_expression(&mut self, roe: &mut ast::RangeOrExpression<'ast>) {
+        walk_range_or_expression(self, roe);
+    }
+
+    fn visit_range(&mut self, rng: &mut ast::Range<'ast>) {
+        walk_range(self, rng);
+    }
+
+    fn visit_from_expression(&mut self, from: &mut ast::FromExpression<'ast>) {
+        walk_from_expression(self, from);
+    }
+
+    fn visit_to_expression(&mut self, to: &mut ast::ToExpression<'ast>) {
+        walk_to_expression(self, to);
+    }
+
     fn visit_member_access(&mut self, ma: &mut ast::MemberAccess<'ast>) {
         walk_member_access(self, ma);
     }
@@ -256,16 +272,63 @@ pub trait ZVisitorMut<'ast>: Sized {
         walk_inline_array_expression(self, iae);
     }
 
+    fn visit_spread_or_expression(&mut self, soe: &mut ast::SpreadOrExpression<'ast>) {
+        walk_spread_or_expression(self, soe);
+    }
+
+    fn visit_spread(&mut self, spread: &mut ast::Spread<'ast>) {
+        walk_spread(self, spread);
+    }
+
     fn visit_inline_struct_expression(&mut self, ise: &mut ast::InlineStructExpression<'ast>) {
         walk_inline_struct_expression(self, ise);
     }
 
-    fn visit_array_initializer_expression(&mut self, aie: &mut ast::ArrayInitializerExpression<'ast>) {
+    fn visit_inline_struct_member(&mut self, ism: &mut ast::InlineStructMember<'ast>) {
+        walk_inline_struct_member(self, ism);
+    }
+
+    fn visit_array_initializer_expression(
+        &mut self,
+        aie: &mut ast::ArrayInitializerExpression<'ast>,
+    ) {
         walk_array_initializer_expression(self, aie);
     }
 
     fn visit_statement(&mut self, stmt: &mut ast::Statement<'ast>) {
         walk_statement(self, stmt);
+    }
+
+    fn visit_return_statement(&mut self, ret: &mut ast::ReturnStatement<'ast>) {
+        walk_return_statement(self, ret);
+    }
+
+    fn visit_definition_statement(&mut self, def: &mut ast::DefinitionStatement<'ast>) {
+        walk_definition_statement(self, def);
+    }
+
+    fn visit_typed_identifier_or_assignee(&mut self, tioa: &mut ast::TypedIdentifierOrAssignee<'ast>) {
+        walk_typed_identifier_or_assignee(self, tioa);
+    }
+
+    fn visit_typed_identifier(&mut self, ti: &mut ast::TypedIdentifier<'ast>) {
+        walk_typed_identifier(self, ti);
+    }
+
+    fn visit_assignee(&mut self, asgn: &mut ast::Assignee<'ast>) {
+        walk_assignee(self, asgn);
+    }
+
+    fn visit_assignee_access(&mut self, acc: &mut ast::AssigneeAccess<'ast>) {
+        walk_assignee_access(self, acc);
+    }
+
+    fn visit_assertion_statement(&mut self, asrt: &mut ast::AssertionStatement<'ast>) {
+        walk_assertion_statement(self, asrt);
+    }
+
+    fn visit_iteration_statement(&mut self, iter: &mut ast::IterationStatement<'ast>) {
+        walk_iteration_statement(self, iter);
     }
 }
 
@@ -372,8 +435,14 @@ pub fn walk_struct_definition<'ast, Z: ZVisitorMut<'ast>>(
     structdef: &mut ast::StructDefinition<'ast>,
 ) {
     visitor.visit_identifier_expression(&mut structdef.id);
-    structdef.generics.iter_mut().for_each(|g| visitor.visit_identifier_expression(g));
-    structdef.fields.iter_mut().for_each(|f| visitor.visit_struct_field(f));
+    structdef
+        .generics
+        .iter_mut()
+        .for_each(|g| visitor.visit_identifier_expression(g));
+    structdef
+        .fields
+        .iter_mut()
+        .for_each(|f| visitor.visit_struct_field(f));
     visitor.visit_span(&mut structdef.span);
 }
 
@@ -391,10 +460,22 @@ pub fn walk_function_definition<'ast, Z: ZVisitorMut<'ast>>(
     fundef: &mut ast::FunctionDefinition<'ast>,
 ) {
     visitor.visit_identifier_expression(&mut fundef.id);
-    fundef.generics.iter_mut().for_each(|g| visitor.visit_identifier_expression(g));
-    fundef.parameters.iter_mut().for_each(|p| visitor.visit_parameter(p));
-    fundef.returns.iter_mut().for_each(|r| visitor.visit_type(r));
-    fundef.statements.iter_mut().for_each(|s| visitor.visit_statement(s));
+    fundef
+        .generics
+        .iter_mut()
+        .for_each(|g| visitor.visit_identifier_expression(g));
+    fundef
+        .parameters
+        .iter_mut()
+        .for_each(|p| visitor.visit_parameter(p));
+    fundef
+        .returns
+        .iter_mut()
+        .for_each(|r| visitor.visit_type(r));
+    fundef
+        .statements
+        .iter_mut()
+        .for_each(|s| visitor.visit_statement(s));
     visitor.visit_span(&mut fundef.span);
 }
 
@@ -751,10 +832,7 @@ pub fn walk_postfix_expression<'ast, Z: ZVisitorMut<'ast>>(
     visitor.visit_span(&mut pe.span);
 }
 
-pub fn walk_access<'ast, Z: ZVisitorMut<'ast>>(
-    visitor: &mut Z,
-    acc: &mut ast::Access<'ast>,
-) {
+pub fn walk_access<'ast, Z: ZVisitorMut<'ast>>(visitor: &mut Z, acc: &mut ast::Access<'ast>) {
     use ast::Access::*;
     match acc {
         Call(ca) => visitor.visit_call_access(ca),
@@ -778,7 +856,9 @@ pub fn walk_arguments<'ast, Z: ZVisitorMut<'ast>>(
     visitor: &mut Z,
     args: &mut ast::Arguments<'ast>,
 ) {
-    args.expressions.iter_mut().for_each(|e| visitor.visit_expression(e));
+    args.expressions
+        .iter_mut()
+        .for_each(|e| visitor.visit_expression(e));
     visitor.visit_span(&mut args.span);
 }
 
@@ -786,39 +866,194 @@ pub fn walk_array_access<'ast, Z: ZVisitorMut<'ast>>(
     visitor: &mut Z,
     aa: &mut ast::ArrayAccess<'ast>,
 ) {
-    // XXX(todo)
+    visitor.visit_range_or_expression(&mut aa.expression);
+    visitor.visit_span(&mut aa.span);
+}
+
+pub fn walk_range_or_expression<'ast, Z: ZVisitorMut<'ast>>(
+    visitor: &mut Z,
+    roe: &mut ast::RangeOrExpression<'ast>,
+) {
+    use ast::RangeOrExpression::*;
+    match roe {
+        Range(r) => visitor.visit_range(r),
+        Expression(e) => visitor.visit_expression(e),
+    }
+}
+
+pub fn walk_range<'ast, Z: ZVisitorMut<'ast>>(visitor: &mut Z, rng: &mut ast::Range<'ast>) {
+    if let Some(f) = &mut rng.from {
+        visitor.visit_from_expression(f);
+    }
+    if let Some(t) = &mut rng.to {
+        visitor.visit_to_expression(t);
+    }
+    visitor.visit_span(&mut rng.span);
+}
+
+pub fn walk_from_expression<'ast, Z: ZVisitorMut<'ast>>(
+    visitor: &mut Z,
+    from: &mut ast::FromExpression<'ast>,
+) {
+    visitor.visit_expression(&mut from.0);
+}
+
+pub fn walk_to_expression<'ast, Z: ZVisitorMut<'ast>>(
+    visitor: &mut Z,
+    to: &mut ast::ToExpression<'ast>,
+) {
+    visitor.visit_expression(&mut to.0);
 }
 
 pub fn walk_member_access<'ast, Z: ZVisitorMut<'ast>>(
     visitor: &mut Z,
     ma: &mut ast::MemberAccess<'ast>,
 ) {
-    // XXX(todo)
+    visitor.visit_identifier_expression(&mut ma.id);
+    visitor.visit_span(&mut ma.span);
 }
 
 pub fn walk_inline_array_expression<'ast, Z: ZVisitorMut<'ast>>(
     visitor: &mut Z,
     iae: &mut ast::InlineArrayExpression<'ast>,
 ) {
-    // XXX(todo)
+    iae.expressions
+        .iter_mut()
+        .for_each(|e| visitor.visit_spread_or_expression(e));
+    visitor.visit_span(&mut iae.span);
+}
+
+pub fn walk_spread_or_expression<'ast, Z: ZVisitorMut<'ast>>(
+    visitor: &mut Z,
+    soe: &mut ast::SpreadOrExpression<'ast>,
+) {
+    use ast::SpreadOrExpression::*;
+    match soe {
+        Spread(s) => visitor.visit_spread(s),
+        Expression(e) => visitor.visit_expression(e),
+    }
+}
+
+pub fn walk_spread<'ast, Z: ZVisitorMut<'ast>>(visitor: &mut Z, spread: &mut ast::Spread<'ast>) {
+    visitor.visit_expression(&mut spread.expression);
+    visitor.visit_span(&mut spread.span);
 }
 
 pub fn walk_inline_struct_expression<'ast, Z: ZVisitorMut<'ast>>(
     visitor: &mut Z,
     ise: &mut ast::InlineStructExpression<'ast>,
 ) {
-    // XXX(todo)
+    visitor.visit_identifier_expression(&mut ise.ty);
+    ise.members
+        .iter_mut()
+        .for_each(|m| visitor.visit_inline_struct_member(m));
+    visitor.visit_span(&mut ise.span);
+}
+
+pub fn walk_inline_struct_member<'ast, Z: ZVisitorMut<'ast>>(
+    visitor: &mut Z,
+    ism: &mut ast::InlineStructMember<'ast>,
+) {
+    visitor.visit_identifier_expression(&mut ism.id);
+    visitor.visit_expression(&mut ism.expression);
+    visitor.visit_span(&mut ism.span);
 }
 
 pub fn walk_array_initializer_expression<'ast, Z: ZVisitorMut<'ast>>(
     visitor: &mut Z,
     aie: &mut ast::ArrayInitializerExpression<'ast>,
 ) {
-    // XXX(todo)
+    visitor.visit_expression(&mut aie.value);
+    visitor.visit_expression(&mut aie.count);
+    visitor.visit_span(&mut aie.span);
 }
+
 pub fn walk_statement<'ast, Z: ZVisitorMut<'ast>>(
     visitor: &mut Z,
     stmt: &mut ast::Statement<'ast>,
 ) {
-    // XXX(todo)
+    use ast::Statement::*;
+    match stmt {
+        Return(r) => visitor.visit_return_statement(r),
+        Definition(d) => visitor.visit_definition_statement(d),
+        Assertion(a) => visitor.visit_assertion_statement(a),
+        Iteration(i) => visitor.visit_iteration_statement(i),
+    }
+}
+
+pub fn walk_return_statement<'ast, Z: ZVisitorMut<'ast>>(
+    visitor: &mut Z,
+    ret: &mut ast::ReturnStatement<'ast>,
+) {
+    ret.expressions.iter_mut().for_each(|e| visitor.visit_expression(e));
+    visitor.visit_span(&mut ret.span);
+}
+
+pub fn walk_definition_statement<'ast, Z: ZVisitorMut<'ast>>(
+    visitor: &mut Z,
+    def: &mut ast::DefinitionStatement<'ast>,
+) {
+    def.lhs.iter_mut().for_each(|l| visitor.visit_typed_identifier_or_assignee(l));
+    visitor.visit_expression(&mut def.expression);
+    visitor.visit_span(&mut def.span);
+}
+
+pub fn walk_typed_identifier_or_assignee<'ast, Z: ZVisitorMut<'ast>>(
+    visitor: &mut Z,
+    tioa: &mut ast::TypedIdentifierOrAssignee<'ast>,
+) {
+    use ast::TypedIdentifierOrAssignee::*;
+    match tioa {
+        Assignee(a) => visitor.visit_assignee(a),
+        TypedIdentifier(ti) => visitor.visit_typed_identifier(ti),
+    }
+}
+
+pub fn walk_typed_identifier<'ast, Z: ZVisitorMut<'ast>>(
+    visitor: &mut Z,
+    tid: &mut ast::TypedIdentifier<'ast>,
+) {
+    visitor.visit_type(&mut tid.ty);
+    visitor.visit_identifier_expression(&mut tid.identifier);
+    visitor.visit_span(&mut tid.span);
+}
+
+pub fn walk_assignee<'ast, Z: ZVisitorMut<'ast>>(
+    visitor: &mut Z,
+    asgn: &mut ast::Assignee<'ast>,
+) {
+    visitor.visit_identifier_expression(&mut asgn.id);
+    asgn.accesses.iter_mut().for_each(|a| visitor.visit_assignee_access(a));
+    visitor.visit_span(&mut asgn.span);
+}
+
+pub fn walk_assignee_access<'ast, Z: ZVisitorMut<'ast>>(
+    visitor: &mut Z,
+    acc: &mut ast::AssigneeAccess<'ast>,
+) {
+    use ast::AssigneeAccess::*;
+    match acc {
+        Select(aa) => visitor.visit_array_access(aa),
+        Member(ma) => visitor.visit_member_access(ma),
+    }
+}
+
+pub fn walk_assertion_statement<'ast, Z: ZVisitorMut<'ast>>(
+    visitor: &mut Z,
+    asrt: &mut ast::AssertionStatement<'ast>,
+) {
+    visitor.visit_expression(&mut asrt.expression);
+    visitor.visit_span(&mut asrt.span);
+}
+
+pub fn walk_iteration_statement<'ast, Z: ZVisitorMut<'ast>>(
+    visitor: &mut Z,
+    iter: &mut ast::IterationStatement<'ast>,
+) {
+    visitor.visit_type(&mut iter.ty);
+    visitor.visit_identifier_expression(&mut iter.index);
+    visitor.visit_expression(&mut iter.from);
+    visitor.visit_expression(&mut iter.to);
+    iter.statements.iter_mut().for_each(|s| visitor.visit_statement(s));
+    visitor.visit_span(&mut iter.span);
 }
