@@ -2,6 +2,7 @@
 
 mod parser;
 mod term;
+pub mod zvisit;
 
 use super::FrontEnd;
 use crate::circify::{Circify, Loc, Val};
@@ -885,7 +886,7 @@ impl<'ast> ZGen<'ast> {
         // rewrite import map by flattening multi-hop imports
         self.flatten_import_map();
         // simple typing pass for decimal literals
-        self.visit_literals();
+        //self.visit_literals();
 
         let t = std::mem::take(&mut self.asts);
         for p in files.iter() {
@@ -1010,6 +1011,7 @@ impl<'ast> ZGen<'ast> {
             .iter().map(|idx| std::mem::take(ig.node_weight_mut(*idx).unwrap())).collect()
     }
 
+    /*
     fn vl_function_(&self, f: &mut ast::FunctionDefinition<'ast>) {
     }
 
@@ -1037,6 +1039,28 @@ impl<'ast> ZGen<'ast> {
     }
 
     fn visit_literals(&mut self) {
+        // DecimalLiteralExpression
+        // -> LiteralExpression
+        //    -> Expression
+        //       -> ConstantDefinition
+        //          -> SymbolDeclaration
+        //       -> ArrayType
+        //       -> Statement (all variants)
+        //       -> ExponentExpression
+        //       -> SpreadOrExpression
+        //       -> Spread
+        //       -> RangeOrExpression
+        //       -> FromExpression
+        //       -> ToExpression
+        //       -> InlineStructMember
+        //       -> ArrayInitializerExpression
+        //       -> Arguments
+        //    -> ConstantGenericValue
+        //       -> ExplicitGenerics
+        //          -> StructType
+        //          -> CallAccess
+
+
         let mut asts = std::mem::take(&mut self.asts);
         for a in asts.values_mut() {
             a.declarations.iter_mut().for_each(|d| match d {
@@ -1048,4 +1072,5 @@ impl<'ast> ZGen<'ast> {
         }
         self.asts = asts;
     }
+    */
 }

@@ -10,15 +10,19 @@ extern crate lazy_static;
 pub use ast::{
     Access, Arguments, ArrayAccess, ArrayInitializerExpression, ArrayType, AssertionStatement,
     Assignee, AssigneeAccess, BasicOrStructType, BasicType, BinaryExpression, BinaryOperator,
-    CallAccess, ConstantDefinition, ConstantGenericValue, DecimalLiteralExpression, DecimalNumber,
-    DecimalSuffix, DefinitionStatement, ExplicitGenerics, Expression, FieldType, File,
-    FromExpression, FunctionDefinition, HexLiteralExpression, HexNumberExpression,
-    IdentifierExpression, ImportDirective, ImportSource, ImportSymbol, InlineArrayExpression,
-    InlineStructExpression, InlineStructMember, IterationStatement, LiteralExpression, Parameter,
-    PostfixExpression, Range, RangeOrExpression, ReturnStatement, Span, Spread, SpreadOrExpression,
-    Statement, StructDefinition, StructField, SymbolDeclaration, TernaryExpression, ToExpression,
-    Type, TypedIdentifier, TypedIdentifierOrAssignee, UnaryExpression, UnaryOperator, Underscore,
-    Visibility,
+    BooleanLiteralExpression, BooleanType, CallAccess, ConstantDefinition, ConstantGenericValue,
+    Curve, DecimalLiteralExpression, DecimalNumber, DecimalSuffix, DefinitionStatement, EOI,
+    ExplicitGenerics, Expression, FieldSuffix, FieldType, File, FromExpression, FromImportDirective,
+    FunctionDefinition, HexLiteralExpression, HexNumberExpression, IdentifierExpression,
+    ImportDirective, ImportSource, ImportSymbol, InlineArrayExpression, InlineStructExpression,
+    InlineStructMember, IterationStatement, LiteralExpression, MainImportDirective, MemberAccess,
+    NegOperator, NotOperator, Parameter, PosOperator, PostfixExpression, Pragma, PrivateVisibility,
+    PrivateNumber, PublicVisibility, Range, RangeOrExpression, ReturnStatement, Span, Spread,
+    SpreadOrExpression, Statement, StructDefinition, StructField, StructType, SymbolDeclaration,
+    TernaryExpression, ToExpression, Type, TypedIdentifier, TypedIdentifierOrAssignee,
+    U8NumberExpression, U16NumberExpression, U32NumberExpression, U64NumberExpression, U8Suffix,
+    U16Suffix, U32Suffix, U64Suffix, U8Type, U16Type, U32Type, U64Type, UnaryExpression,
+    UnaryOperator, Underscore, Visibility,
 };
 
 mod ast {
