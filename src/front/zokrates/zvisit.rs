@@ -12,7 +12,9 @@ pub trait ZVisitorMut<'ast>: Sized {
         walk_pragma(self, pragma);
     }
 
-    fn visit_curve(&mut self, _curve: &mut ast::Curve<'ast>) {}
+    fn visit_curve(&mut self, curve: &mut ast::Curve<'ast>) {
+        walk_curve(self, curve);
+    }
 
     fn visit_span(&mut self, _span: &mut ast::Span<'ast>) {}
 
@@ -346,6 +348,10 @@ pub fn walk_file<'ast, Z: ZVisitorMut<'ast>>(visitor: &mut Z, file: &mut ast::Fi
 pub fn walk_pragma<'ast, Z: ZVisitorMut<'ast>>(visitor: &mut Z, pragma: &mut ast::Pragma<'ast>) {
     visitor.visit_curve(&mut pragma.curve);
     visitor.visit_span(&mut pragma.span);
+}
+
+pub fn walk_curve<'ast, Z: ZVisitorMut<'ast>>(visitor: &mut Z, curve: &mut ast::Curve<'ast>) {
+    visitor.visit_span(&mut curve.span);
 }
 
 pub fn walk_symbol_declaration<'ast, Z: ZVisitorMut<'ast>>(
