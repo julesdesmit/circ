@@ -17,6 +17,7 @@ use std::str::FromStr;
 use zokrates_pest_ast as ast;
 
 use term::*;
+use zvisit::{ZConstLiteralRewriter, ZVisitorMut};
 
 /// The modulus for the ZoKrates language.
 pub use term::ZOKRATES_MODULUS;
@@ -231,15 +232,16 @@ impl<'ast> ZGen<'ast> {
                                 self.err(
                                     format!(
                                         "Assignment type mismatch: {} annotatved vs {} actual",
-                                        decl_ty,
-                                        ty,
+                                        decl_ty, ty,
                                     ),
                                     &d.span,
                                 );
                             }
-                            let d_res = self
-                                .circ
-                                .declare_init(l.identifier.value.clone(), decl_ty, Val::Term(e));
+                            let d_res = self.circ.declare_init(
+                                l.identifier.value.clone(),
+                                decl_ty,
+                                Val::Term(e),
+                            );
                             self.unwrap(d_res, &d.span);
                         }
                     }
@@ -315,30 +317,30 @@ impl<'ast> ZGen<'ast> {
                     Some(ast::DecimalSuffix::Field(_)) => {
                         T::Field(pf_lit(Integer::from_str_radix(vstr, 10).unwrap()))
                     }
-                    // XXX(unimpl) need to infer int size from context. yuck.
-                    // TODO return a T::Uint(0, Term::Integer), unify up the tree?
-                    _ => self.err("Refusing to infer literal type. Annotation needed.", &d.span),
+                    // XXX(unimpl) need to infer int size from context
+                    _ => self.err("Could not infer literal type. Annotation needed.", &d.span),
                 }
             }
             ast::LiteralExpression::BooleanLiteral(b) => {
                 Self::const_bool(bool::from_str(&b.value).unwrap())
             }
-            ast::LiteralExpression::HexLiteral(h) => {
-                match &h.value {
-                    ast::HexNumberExpression::U8(h) => {
-                        T::Uint(8, bv_lit(u8::from_str_radix(&h.value[2..], 16).unwrap(), 8))
-                    }
-                    ast::HexNumberExpression::U16(h) => {
-                        T::Uint(16, bv_lit(u16::from_str_radix(&h.value[2..], 16).unwrap(), 16))
-                    }
-                    ast::HexNumberExpression::U32(h) => {
-                        T::Uint(32, bv_lit(u32::from_str_radix(&h.value[2..], 16).unwrap(), 32))
-                    }
-                    ast::HexNumberExpression::U64(h) => {
-                        T::Uint(64, bv_lit(u64::from_str_radix(&h.value[2..], 16).unwrap(), 64))
-                    }
+            ast::LiteralExpression::HexLiteral(h) => match &h.value {
+                ast::HexNumberExpression::U8(h) => {
+                    T::Uint(8, bv_lit(u8::from_str_radix(&h.value[2..], 16).unwrap(), 8))
                 }
-            }
+                ast::HexNumberExpression::U16(h) => T::Uint(
+                    16,
+                    bv_lit(u16::from_str_radix(&h.value[2..], 16).unwrap(), 16),
+                ),
+                ast::HexNumberExpression::U32(h) => T::Uint(
+                    32,
+                    bv_lit(u32::from_str_radix(&h.value[2..], 16).unwrap(), 32),
+                ),
+                ast::HexNumberExpression::U64(h) => T::Uint(
+                    64,
+                    bv_lit(u64::from_str_radix(&h.value[2..], 16).unwrap(), 64),
+                ),
+            },
         }
     }
 
@@ -405,10 +407,8 @@ impl<'ast> ZGen<'ast> {
                     Ok(v.clone())
                 } else {
                     Ok(self
-                       .unwrap(self
-                               .circ
-                               .get_value(Loc::local(u.value.clone())), &u.span)
-                       .unwrap_term())
+                        .unwrap(self.circ.get_value(Loc::local(u.value.clone())), &u.span)
+                        .unwrap_term())
                 }
             }
             ast::Expression::InlineArray(u) => {
@@ -450,50 +450,69 @@ impl<'ast> ZGen<'ast> {
                         .collect::<Vec<_>>();
                     let res = if f_path.to_string_lossy().starts_with("EMBED") {
                         // builtins have no generics
-                        if !c.explicit_generics
+                        if !c
+                            .explicit_generics
                             .as_ref()
                             .map(|g| g.values.is_empty())
-                            .unwrap_or(true) {
+                            .unwrap_or(true)
+                        {
                             self.err("generic builtins not supported", &c.span);
                         }
                         Self::builtin_call(f_path.to_str().unwrap(), args).unwrap()
                     } else {
                         let p = (f_path, f_name);
-                        let f = self.functions
+                        let f = self
+                            .functions
                             .get(&p)
                             .unwrap_or_else(|| panic!("No function '{}'", p.1))
                             .clone();
-                        if f.generics.len() !=
-                            c.explicit_generics.as_ref().map(|g| g.values.len()).unwrap_or(0) {
+                        if f.generics.len()
+                            != c.explicit_generics
+                                .as_ref()
+                                .map(|g| g.values.len())
+                                .unwrap_or(0)
+                        {
                             self.err("cannot determine generic params for function call", &c.span);
                         }
                         self.file_stack.push(p.0);
-                        self.generics_stack.push(c.explicit_generics.as_ref()
-                            .map(|g| g.values
-                                 .iter()
-                                 .zip(&f.generics[..])
-                                 .map(|(cgv, n)| match cgv {
-                                     ast::ConstantGenericValue::Value(l) => {
-                                         (n.value.clone(), self.literal_(&l))
-                                     }
-                                     ast::ConstantGenericValue::Identifier(i) => {
-                                         if let Some(v) = self.generic_lookup_(&i.value) {
-                                             (n.value.clone(), v.clone())
-                                         } else if let Some(v) = self.const_lookup_(&i.value) {
-                                             (n.value.clone(), v.clone())
-                                         } else {
-                                             self.err(format!(
-                                                     "no const {} in current context",
-                                                     &i.value),
-                                                     &i.span);
-                                         }
-                                     }
-                                     ast::ConstantGenericValue::Underscore(u) => {
-                                         self.err("cannot resolve generic argument", &u.span);
-                                     }
-                                 })
-                                 .collect())
-                            .unwrap_or_else(|| HashMap::new()));
+                        self.generics_stack.push(
+                            c.explicit_generics
+                                .as_ref()
+                                .map(|g| {
+                                    g.values
+                                        .iter()
+                                        .zip(&f.generics[..])
+                                        .map(|(cgv, n)| match cgv {
+                                            ast::ConstantGenericValue::Value(l) => {
+                                                (n.value.clone(), self.literal_(&l))
+                                            }
+                                            ast::ConstantGenericValue::Identifier(i) => {
+                                                if let Some(v) = self.generic_lookup_(&i.value) {
+                                                    (n.value.clone(), v.clone())
+                                                } else if let Some(v) = self.const_lookup_(&i.value)
+                                                {
+                                                    (n.value.clone(), v.clone())
+                                                } else {
+                                                    self.err(
+                                                        format!(
+                                                            "no const {} in current context",
+                                                            &i.value
+                                                        ),
+                                                        &i.span,
+                                                    );
+                                                }
+                                            }
+                                            ast::ConstantGenericValue::Underscore(u) => {
+                                                self.err(
+                                                    "cannot resolve generic argument",
+                                                    &u.span,
+                                                );
+                                            }
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_else(|| HashMap::new()),
+                        );
                         // XXX(unimpl) tuple returns not supported
                         assert!(f.returns.len() <= 1);
                         let ret_ty = f.returns.first().map(|r| self.type_(r));
@@ -708,7 +727,9 @@ impl<'ast> ZGen<'ast> {
     }
 
     fn const_usize_(&self, e: &ast::Expression<'ast>) -> usize {
-        self.unwrap(const_int(self.const_expr_(e)), e.span()).to_usize().unwrap()
+        self.unwrap(const_int(self.const_expr_(e)), e.span())
+            .to_usize()
+            .unwrap()
     }
 
     fn const_expr_(&self, e: &ast::Expression<'ast>) -> T {
@@ -805,16 +826,26 @@ impl<'ast> ZGen<'ast> {
         }
     }
 
-    fn const_decl_(&mut self, c: &ast::ConstantDefinition<'ast>) {
+    fn const_decl_(&mut self, c: &mut ast::ConstantDefinition<'ast>) {
         debug!("Const decl: {}", c.span.as_str());
         // make sure that this wasn't already an important const name
-        if self.import_map.contains_key(&(self.cur_path().to_path_buf(), c.id.value.clone())) {
-            self.err(format!("Constant {} redefined after import", &c.id.value), &c.span);
+        if self
+            .import_map
+            .contains_key(&(self.cur_path().to_path_buf(), c.id.value.clone()))
+        {
+            self.err(
+                format!("Constant {} redefined after import", &c.id.value),
+                &c.span,
+            );
         }
 
-        // evaluate
-        let name = c.id.value.clone();
+        // handle literal type inference using declared type
         let ctype = self.const_type_(&c);
+        let mut v = ZConstLiteralRewriter::new(Some(ctype.clone()));
+        v.visit_expression(&mut c.expression)
+            .unwrap_or_else(|e| self.err(e.0, &c.span));
+
+        // evaluate the expression and check the resulting type
         let value = self.const_expr_(&c.expression);
         if ctype != value.type_() {
             self.err("Type mismatch in constant definition", &c.span);
@@ -822,7 +853,11 @@ impl<'ast> ZGen<'ast> {
 
         // insert into constant map
         let path = self.cur_path().to_owned();
-        if self.constants.insert((path, name), value).is_some() {
+        if self
+            .constants
+            .insert((path, c.id.value.clone()), value)
+            .is_some()
+        {
             self.err(format!("Constant {} redefined", &c.id.value), &c.span);
         }
     }
@@ -881,12 +916,11 @@ impl<'ast> ZGen<'ast> {
     }
 
     fn visit_files(&mut self) {
-        // first, go through includes and return a toposorted visit order for remaining processing
-        let files = self.visit_includes();
-        // rewrite import map by flattening multi-hop imports
-        self.flatten_import_map();
-        // simple typing pass for decimal literals
-        //self.visit_literals();
+        // 1. go through includes and return a toposorted visit order for remaining processing
+        let files = self.visit_imports();
+
+        // 2. visit constant definitions, inferring types for const literals
+        self.visit_constants(&files);
 
         let t = std::mem::take(&mut self.asts);
         for p in files.iter() {
@@ -894,8 +928,8 @@ impl<'ast> ZGen<'ast> {
             // XXX(opt) retain() declarations instead? if we don't need them, saves allocs
             for d in t.get(p).unwrap().declarations.iter() {
                 match d {
-                    ast::SymbolDeclaration::Import(_) => (), // already visited in visit_includes()
-                    ast::SymbolDeclaration::Constant(c) => self.const_decl_(c),
+                    ast::SymbolDeclaration::Import(_) => (),   // visit_imports()
+                    ast::SymbolDeclaration::Constant(_) => (), // visit_constants()
                     ast::SymbolDeclaration::Struct(s) => {
                         /*
                         let ty = Ty::Struct(
@@ -910,17 +944,13 @@ impl<'ast> ZGen<'ast> {
                         self.circ.def_type(&s.id.value, ty);
                         */
                         debug!("struct {} in {}", s.id.value, self.cur_path().display());
-                        self.structs.insert(
-                            (self.cur_path().to_owned(), s.id.value.clone()),
-                            s.clone(),
-                        );
+                        self.structs
+                            .insert((self.cur_path().to_owned(), s.id.value.clone()), s.clone());
                     }
                     ast::SymbolDeclaration::Function(f) => {
                         debug!("fn {} in {}", f.id.value, self.cur_path().display());
-                        self.functions.insert(
-                            (self.cur_path().to_owned(), f.id.value.clone()),
-                            f.clone(),
-                        );
+                        self.functions
+                            .insert((self.cur_path().to_owned(), f.id.value.clone()), f.clone());
                     }
                 }
             }
@@ -929,9 +959,9 @@ impl<'ast> ZGen<'ast> {
         self.asts = t;
     }
 
-    fn visit_includes(&mut self) -> Vec<PathBuf> {
-        use petgraph::graph::{DiGraph, NodeIndex, DefaultIx};
+    fn visit_imports(&mut self) -> Vec<PathBuf> {
         use petgraph::algo::toposort;
+        use petgraph::graph::{DefaultIx, DiGraph, NodeIndex};
         let asts = std::mem::take(&mut self.asts);
 
         // we use the graph to toposort the includes and the map to go from PathBuf to NodeIdx
@@ -951,7 +981,8 @@ impl<'ast> ZGen<'ast> {
                         ast::ImportDirective::Main(m) => (
                             m.source.value.clone(),
                             vec!["main".to_owned()],
-                            vec![m.alias
+                            vec![m
+                                .alias
                                 .as_ref()
                                 .map(|a| a.value.clone())
                                 .unwrap_or_else(|| {
@@ -965,12 +996,15 @@ impl<'ast> ZGen<'ast> {
                         ast::ImportDirective::From(m) => (
                             m.source.value.clone(),
                             m.symbols.iter().map(|s| s.id.value.clone()).collect(),
-                            m.symbols.iter().map(|s| {
-                                s.alias
-                                    .as_ref()
-                                    .map(|a| a.value.clone())
-                                    .unwrap_or_else(|| s.id.value.clone())
-                            }).collect(),
+                            m.symbols
+                                .iter()
+                                .map(|s| {
+                                    s.alias
+                                        .as_ref()
+                                        .map(|a| a.value.clone())
+                                        .unwrap_or_else(|| s.id.value.clone())
+                                })
+                                .collect(),
                         ),
                     };
                     assert!(src_names.len() > 0);
@@ -981,7 +1015,9 @@ impl<'ast> ZGen<'ast> {
                         abs_src_path.display(),
                         dst_names
                     );
-                    src_names.into_iter().zip(dst_names.into_iter())
+                    src_names
+                        .into_iter()
+                        .zip(dst_names.into_iter())
                         .for_each(|(sn, dn)| {
                             self.import_map.insert(
                                 (self.cur_path().to_path_buf(), dn),
@@ -1001,76 +1037,34 @@ impl<'ast> ZGen<'ast> {
         }
         self.asts = asts;
 
+        // flatten the import map, i.e., a -> b -> c becomes a -> c
+        self.flatten_import_map();
+
         toposort(&ig, None)
             .unwrap_or_else(|e| {
-                use petgraph::dot::{Dot, Config};
-                panic!("Import graph is cyclic!: {:?}\n{:?}\n",
-                       e,
-                       Dot::with_config(&ig, &[Config::EdgeNoLabel]))
+                use petgraph::dot::{Config, Dot};
+                panic!(
+                    "Import graph is cyclic!: {:?}\n{:?}\n",
+                    e,
+                    Dot::with_config(&ig, &[Config::EdgeNoLabel])
+                )
             })
-            .iter().map(|idx| std::mem::take(ig.node_weight_mut(*idx).unwrap())).collect()
+            .iter()
+            .map(|idx| std::mem::take(ig.node_weight_mut(*idx).unwrap()))
+            .collect()
     }
 
-    /*
-    fn vl_function_(&self, f: &mut ast::FunctionDefinition<'ast>) {
-    }
-
-    fn vl_constant_(&self, c: &mut ast::ConstantDefinition<'ast>) {
-        self.vl_type_(&mut c.ty);
-        self.vl_expression_as_(&mut c.expression, &c.ty);
-    }
-
-    fn vl_expression_as_(&self, e: &mut ast::Expression<'ast>, t: &ast::Type<'ast>) {
-    }
-
-    fn vl_type_(&self, t: &mut ast::Type<'ast>) {
-        match t {
-            ast::Type::Basic(_) => (),
-            ast::Type::Struct(s) => (),
-            ast::Type::Array(a) => (),
+    fn visit_constants(&mut self, files: &[PathBuf]) {
+        let mut t = std::mem::take(&mut self.asts);
+        for p in files.iter() {
+            self.file_stack.push(p.to_owned());
+            for d in t.get_mut(p).unwrap().declarations.iter_mut() {
+                if let ast::SymbolDeclaration::Constant(c) = d {
+                    self.const_decl_(c);
+                }
+            }
+            self.file_stack.pop();
         }
+        self.asts = t;
     }
-
-    fn vl_struct_(&self, s: &mut ast::StructDefinition<'ast>) {
-        // StructDefinition
-        //   - fields: StructField
-        //       - ty: Type
-        s.fields.iter_mut().for_each(|f| self.vl_type_(&mut f.ty));
-    }
-
-    fn visit_literals(&mut self) {
-        // DecimalLiteralExpression
-        // -> LiteralExpression
-        //    -> Expression
-        //       -> ConstantDefinition
-        //          -> SymbolDeclaration
-        //       -> ArrayType
-        //       -> Statement (all variants)
-        //       -> ExponentExpression
-        //       -> SpreadOrExpression
-        //       -> Spread
-        //       -> RangeOrExpression
-        //       -> FromExpression
-        //       -> ToExpression
-        //       -> InlineStructMember
-        //       -> ArrayInitializerExpression
-        //       -> Arguments
-        //    -> ConstantGenericValue
-        //       -> ExplicitGenerics
-        //          -> StructType
-        //          -> CallAccess
-
-
-        let mut asts = std::mem::take(&mut self.asts);
-        for a in asts.values_mut() {
-            a.declarations.iter_mut().for_each(|d| match d {
-                ast::SymbolDeclaration::Import(_) => (),
-                ast::SymbolDeclaration::Function(f) => self.vl_function_(f),
-                ast::SymbolDeclaration::Constant(c) => self.vl_constant_(c),
-                ast::SymbolDeclaration::Struct(s) => self.vl_struct_(s),
-            });
-        }
-        self.asts = asts;
-    }
-    */
 }
