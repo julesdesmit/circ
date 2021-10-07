@@ -1,6 +1,7 @@
 //! AST Walker for zokrates_pest_ast
 #![allow(missing_docs)]
 
+use std::collections::HashMap;
 use zokrates_pest_ast as ast;
 
 use super::term::Ty;
@@ -1228,64 +1229,192 @@ pub fn walk_iteration_statement<'ast, Z: ZVisitorMut<'ast>>(
 
 // *************************
 
+pub(super) struct ZStatementWalker<'ast, 'ret> {
+    ret_tys: &'ret [ast::Type<'ast>],
+    vars: HashMap<String, ast::Type<'ast>>,
+    rewriter: ZConstLiteralRewriter,
+}
+
+impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
+    pub fn new(ret_tys: &'ret [ast::Type<'ast>]) -> Self {
+        let vars = HashMap::new();
+        let rewriter = ZConstLiteralRewriter::new(None);
+        Self {
+            ret_tys,
+            vars,
+            rewriter,
+        }
+    }
+
+    fn unify(
+        &mut self,
+        ty: Option<ast::Type<'ast>>,
+        expr: &mut ast::Expression<'ast>,
+    ) -> ZVisitorResult {
+        // XXX(TODO)
+        // XXX rewriter using ast::Type instead?
+        self.rewriter.visit_expression(expr)
+    }
+}
+
+impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
+    fn visit_return_statement(&mut self, ret: &mut ast::ReturnStatement<'ast>) -> ZVisitorResult {
+        if self.ret_tys.len() != ret.expressions.len() {
+            return Err(ZVisitorError(
+                "ZStatementWalker: mismatched return expression/type".to_owned(),
+            ));
+        }
+
+        // XXX(unimpl) multi-return statements not supported
+        if self.ret_tys.len() > 1 {
+            return Err(ZVisitorError(
+                "ZStatementWalker: multi-returns not supported".to_owned(),
+            ));
+        }
+
+        if let Some(expr) = ret.expressions.first_mut() {
+            self.unify(self.ret_tys.first().cloned(), expr)?;
+        }
+        walk_return_statement(self, ret)
+    }
+
+    fn visit_assertion_statement(
+        &mut self,
+        asrt: &mut ast::AssertionStatement<'ast>,
+    ) -> ZVisitorResult {
+        let ty = ast::Type::Basic(ast::BasicType::Boolean(ast::BooleanType {
+            span: asrt.span.clone(),
+        }));
+        self.unify(Some(ty), &mut asrt.expression)?;
+        walk_assertion_statement(self, asrt)
+    }
+
+    fn visit_iteration_statement(
+        &mut self,
+        iter: &mut ast::IterationStatement<'ast>,
+    ) -> ZVisitorResult {
+        // XXX(TODO)
+        walk_iteration_statement(self, iter)
+    }
+
+    fn visit_definition_statement(
+        &mut self,
+        def: &mut ast::DefinitionStatement<'ast>,
+    ) -> ZVisitorResult {
+        def.lhs
+            .iter_mut()
+            .try_for_each(|l| self.visit_typed_identifier_or_assignee(l))?;
+
+        // unify lhs and rhs
+        // XXX(unimpl) multi-LHS statements not supported
+        if def.lhs.len() > 1 {
+            return Err(ZVisitorError(
+                "ZStatementWalker: multi-LHS assignments not supported".to_owned(),
+            ));
+        }
+        let ty = def
+            .lhs
+            .first()
+            .map(|tioa| {
+                use ast::TypedIdentifierOrAssignee::*;
+                self.vars
+                    .get(match tioa {
+                        Assignee(a) => &a.id.value,
+                        TypedIdentifier(ti) => &ti.identifier.value,
+                    })
+                    .cloned()
+            })
+            .flatten();
+        self.unify(ty, &mut def.expression)?;
+        self.visit_expression(&mut def.expression)?;
+        self.visit_span(&mut def.span)
+    }
+
+    fn visit_typed_identifier_or_assignee(
+        &mut self,
+        tioa: &mut ast::TypedIdentifierOrAssignee<'ast>,
+    ) -> ZVisitorResult {
+        use ast::TypedIdentifierOrAssignee::*;
+        match tioa {
+            Assignee(a) => {
+                // XXX(rsw) do we want to / can we validate the access chain?
+                if !self.vars.contains_key(&a.id.value) {
+                    Err(ZVisitorError(format!(
+                        "ZStatementWalker: assignment to undeclared variable {}",
+                        &a.id.value
+                    )))
+                } else {
+                    self.visit_assignee(a)
+                }
+            }
+            TypedIdentifier(ti) => {
+                self.vars.insert(ti.identifier.value.clone(), ti.ty.clone());
+                self.visit_typed_identifier(ti)
+            }
+        }
+    }
+}
+
 pub(super) struct ZConstLiteralRewriter {
     to_ty: Option<Ty>,
-    found: bool,
+    //found: bool,
 }
 
 impl ZConstLiteralRewriter {
     pub fn new(to_ty: Option<Ty>) -> Self {
         Self {
             to_ty,
-            found: false,
+            //found: false,
         }
     }
 
+    /*
     #[allow(dead_code)]
     pub fn found(&self) -> bool {
         self.found
     }
+    */
 
     pub fn replace(&mut self, to_ty: Option<Ty>) -> Option<Ty> {
         std::mem::replace(&mut self.to_ty, to_ty)
     }
 }
 
-/*
-Expressions can be any of:
-
-Ternary(TernaryExpression<'ast>),
-Binary(BinaryExpression<'ast>),
-Unary(UnaryExpression<'ast>),
-    -> no change to expected type: each sub-expr should have the expected type
-
-Postfix(PostfixExpression<'ast>),
-    -> cannot type Access results, but descend into sub-exprs to type array indices
-
-Identifier(IdentifierExpression<'ast>),
-    -> nothing to do (terminal)
-
-Literal(LiteralExpression<'ast>),
-    -> literal should have same type as expression
-
-InlineArray(InlineArrayExpression<'ast>),
-    -> descend into SpreadOrExpression, looking for either array or element type
-
-InlineStruct(InlineStructExpression<'ast>),
-    -> XXX(unimpl) we do not know expected type (const structs not supported)
-
-ArrayInitializer(ArrayInitializerExpression<'ast>),
-    -> value should have type of value inside Array
-    -> count should have type Field
-*/
-
 impl<'ast> ZVisitorMut<'ast> for ZConstLiteralRewriter {
+    /*
+    Expressions can be any of:
+
+    Ternary(TernaryExpression<'ast>),
+    Binary(BinaryExpression<'ast>),
+    Unary(UnaryExpression<'ast>),
+        -> no change to expected type: each sub-expr should have the expected type
+
+    Postfix(PostfixExpression<'ast>),
+        -> cannot type Access results, but descend into sub-exprs to type array indices
+
+    Identifier(IdentifierExpression<'ast>),
+        -> nothing to do (terminal)
+
+    Literal(LiteralExpression<'ast>),
+        -> literal should have same type as expression
+
+    InlineArray(InlineArrayExpression<'ast>),
+        -> descend into SpreadOrExpression, looking for either array or element type
+
+    InlineStruct(InlineStructExpression<'ast>),
+        -> XXX(unimpl) we do not know expected type (const structs not supported)
+
+    ArrayInitializer(ArrayInitializerExpression<'ast>),
+        -> value should have type of value inside Array
+        -> count should have type Field
+    */
+
     fn visit_decimal_literal_expression(
         &mut self,
         dle: &mut ast::DecimalLiteralExpression<'ast>,
     ) -> ZVisitorResult {
         if dle.suffix.is_none() && self.to_ty.is_some() {
-            self.found = true;
+            //self.found = true;
             dle.suffix.replace(match self.to_ty.as_ref().unwrap() {
                 Ty::Uint(8) => Ok(ast::DecimalSuffix::U8(ast::U8Suffix {
                     span: dle.span.clone(),

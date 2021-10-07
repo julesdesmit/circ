@@ -17,7 +17,7 @@ use std::str::FromStr;
 use zokrates_pest_ast as ast;
 
 use term::*;
-use zvisit::{ZConstLiteralRewriter, ZVisitorMut};
+use zvisit::{ZConstLiteralRewriter, ZStatementWalker, ZVisitorMut};
 
 /// The modulus for the ZoKrates language.
 pub use term::ZOKRATES_MODULUS;
@@ -289,7 +289,7 @@ impl<'ast> ZGen<'ast> {
                     let i = if let ast::RangeOrExpression::Expression(e) = &m.expression {
                         self.expr(&e)
                     } else {
-                        panic!("Cannot assign to slice")
+                        self.err("Cannot assign to slice", &m.span);
                     };
                     ZLoc::Idx(Box::new(inner), i)
                 }
@@ -827,7 +827,6 @@ impl<'ast> ZGen<'ast> {
     }
 
     fn const_decl_(&mut self, c: &mut ast::ConstantDefinition<'ast>) {
-        debug!("Const decl: {}", c.span.as_str());
         // make sure that this wasn't already an important const name
         if self
             .import_map
@@ -920,43 +919,14 @@ impl<'ast> ZGen<'ast> {
         let files = self.visit_imports();
 
         // 2. visit constant definitions, inferring types for const literals
-        self.visit_constants(&files);
+        self.visit_constants(files.clone());
 
-        let t = std::mem::take(&mut self.asts);
-        for p in files.iter() {
-            self.file_stack.push(p.to_owned());
-            // XXX(opt) retain() declarations instead? if we don't need them, saves allocs
-            for d in t.get(p).unwrap().declarations.iter() {
-                match d {
-                    ast::SymbolDeclaration::Import(_) => (),   // visit_imports()
-                    ast::SymbolDeclaration::Constant(_) => (), // visit_constants()
-                    ast::SymbolDeclaration::Struct(s) => {
-                        /*
-                        let ty = Ty::Struct(
-                            s.id.value.clone(),
-                            s.fields
-                                .clone()
-                                .iter()
-                                .map(|f| (f.id.value.clone(), self.type_(&f.ty)))
-                                .collect(),
-                        );
-                        debug!("struct {}", s.id.value);
-                        self.circ.def_type(&s.id.value, ty);
-                        */
-                        debug!("struct {} in {}", s.id.value, self.cur_path().display());
-                        self.structs
-                            .insert((self.cur_path().to_owned(), s.id.value.clone()), s.clone());
-                    }
-                    ast::SymbolDeclaration::Function(f) => {
-                        debug!("fn {} in {}", f.id.value, self.cur_path().display());
-                        self.functions
-                            .insert((self.cur_path().to_owned(), f.id.value.clone()), f.clone());
-                    }
-                }
-            }
-            self.file_stack.pop();
-        }
-        self.asts = t;
+        // 3. visit struct definitions, inferring types for literals
+        // XXX(unimpl) visiting struct defs after const defs makes struct consts harder to support
+        self.visit_structs(files.clone());
+
+        // 4. visit function definitions, inferring types and generics
+        self.visit_functions(files);
     }
 
     fn visit_imports(&mut self) -> Vec<PathBuf> {
@@ -1054,16 +1024,73 @@ impl<'ast> ZGen<'ast> {
             .collect()
     }
 
-    fn visit_constants(&mut self, files: &[PathBuf]) {
+    fn visit_constants(&mut self, files: Vec<PathBuf>) {
         let mut t = std::mem::take(&mut self.asts);
-        for p in files.iter() {
-            self.file_stack.push(p.to_owned());
-            for d in t.get_mut(p).unwrap().declarations.iter_mut() {
+        for p in files {
+            self.file_stack.push(p);
+            for d in t.get_mut(self.cur_path()).unwrap().declarations.iter_mut() {
                 if let ast::SymbolDeclaration::Constant(c) = d {
+                    debug!("const {} in {}", c.id.value, self.cur_path().display());
                     self.const_decl_(c);
                 }
             }
             self.file_stack.pop();
+        }
+        self.asts = t;
+    }
+
+    fn visit_structs(&mut self, files: Vec<PathBuf>) {
+        let t = std::mem::take(&mut self.asts);
+        for p in files {
+            self.file_stack.push(p);
+            for d in t.get(self.cur_path()).unwrap().declarations.iter() {
+                if let ast::SymbolDeclaration::Struct(s) = d {
+                    debug!("struct {} in {}", s.id.value, self.cur_path().display());
+                    let mut s_ast = s.clone();
+
+                    // rewrite literals in ArrayTypes
+                    ZConstLiteralRewriter::new(None)
+                        .visit_struct_definition(&mut s_ast)
+                        .unwrap_or_else(|e| self.err(e.0, &s.span));
+
+                    self.structs.insert((self.cur_path().to_owned(), s.id.value.clone()), s_ast);
+                }
+            }
+            self.file_stack.pop();
+        }
+        self.asts = t;
+    }
+
+    fn visit_functions(&mut self, files: Vec<PathBuf>) {
+        let t = std::mem::take(&mut self.asts);
+        for p in files {
+            self.file_stack.push(p);
+            for d in t.get(self.cur_path()).unwrap().declarations.iter() {
+                if let ast::SymbolDeclaration::Function(f) = d {
+                    debug!("fn {} in {}", f.id.value, self.cur_path().display());
+                    let mut f_ast = f.clone();
+
+                    // rewrite literals in params and returns
+                    let mut v = ZConstLiteralRewriter::new(None);
+                    f_ast.parameters
+                        .iter_mut()
+                        .try_for_each(|p| v.visit_parameter(p))
+                        .unwrap_or_else(|e| self.err(e.0, &f.span));
+                    f_ast.returns
+                        .iter_mut()
+                        .try_for_each(|r| v.visit_type(r))
+                        .unwrap_or_else(|e| self.err(e.0, &f.span));
+
+                    // go through stmts rewriting literals and generics
+                    let mut sw = ZStatementWalker::new(f_ast.returns.as_ref());
+                    f_ast.statements
+                        .iter_mut()
+                        .try_for_each(|s| sw.visit_statement(s))
+                        .unwrap_or_else(|e| self.err(e.0, &f.span));
+
+                    self.functions.insert((self.cur_path().to_owned(), f.id.value.clone()), f_ast);
+                }
+            }
         }
         self.asts = t;
     }
