@@ -101,7 +101,7 @@ struct ZGen<'ast> {
     generics_stack: Vec<HashMap<String, T>>,
     functions: HashMap<(PathBuf, String), ast::FunctionDefinition<'ast>>,
     structs: HashMap<(PathBuf, String), ast::StructDefinition<'ast>>,
-    constants: HashMap<(PathBuf, String), T>,
+    constants: HashMap<(PathBuf, String), (ast::Type<'ast>, T)>,
     import_map: HashMap<(PathBuf, String), (PathBuf, String)>,
     mode: Mode,
 }
@@ -714,8 +714,16 @@ impl<'ast> ZGen<'ast> {
         self.generics_stack.last().unwrap().get(i)
     }
 
+    fn const_ty_lookup_(&self, i: &str) -> Option<&ast::Type<'ast>> {
+        self.constants
+            .get(&self.deref_import(i.to_string()))
+            .map(|(t, _)| t)
+    }
+
     fn const_lookup_(&self, i: &str) -> Option<&T> {
-        self.constants.get(&self.deref_import(i.to_string()))
+        self.constants
+            .get(&self.deref_import(i.to_string()))
+            .map(|(_, v)| v)
     }
 
     fn const_identifier_(&self, i: &ast::IdentifierExpression<'ast>) -> T {
@@ -854,7 +862,7 @@ impl<'ast> ZGen<'ast> {
         let path = self.cur_path().to_owned();
         if self
             .constants
-            .insert((path, c.id.value.clone()), value)
+            .insert((path, c.id.value.clone()), (c.ty.clone(), value))
             .is_some()
         {
             self.err(format!("Constant {} redefined", &c.id.value), &c.span);
@@ -1053,7 +1061,8 @@ impl<'ast> ZGen<'ast> {
                         .visit_struct_definition(&mut s_ast)
                         .unwrap_or_else(|e| self.err(e.0, &s.span));
 
-                    self.structs.insert((self.cur_path().to_owned(), s.id.value.clone()), s_ast);
+                    self.structs
+                        .insert((self.cur_path().to_owned(), s.id.value.clone()), s_ast);
                 }
             }
             self.file_stack.pop();
@@ -1072,23 +1081,31 @@ impl<'ast> ZGen<'ast> {
 
                     // rewrite literals in params and returns
                     let mut v = ZConstLiteralRewriter::new(None);
-                    f_ast.parameters
+                    f_ast
+                        .parameters
                         .iter_mut()
                         .try_for_each(|p| v.visit_parameter(p))
                         .unwrap_or_else(|e| self.err(e.0, &f.span));
-                    f_ast.returns
+                    f_ast
+                        .returns
                         .iter_mut()
                         .try_for_each(|r| v.visit_type(r))
                         .unwrap_or_else(|e| self.err(e.0, &f.span));
 
                     // go through stmts rewriting literals and generics
-                    let mut sw = ZStatementWalker::new(f_ast.returns.as_ref());
-                    f_ast.statements
+                    let mut sw = ZStatementWalker::new(
+                        f_ast.returns.as_ref(),
+                        f_ast.generics.as_ref(),
+                        self,
+                    );
+                    f_ast
+                        .statements
                         .iter_mut()
                         .try_for_each(|s| sw.visit_statement(s))
                         .unwrap_or_else(|e| self.err(e.0, &f.span));
 
-                    self.functions.insert((self.cur_path().to_owned(), f.id.value.clone()), f_ast);
+                    self.functions
+                        .insert((self.cur_path().to_owned(), f.id.value.clone()), f_ast);
                 }
             }
         }

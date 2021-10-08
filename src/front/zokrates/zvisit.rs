@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use zokrates_pest_ast as ast;
 
 use super::term::Ty;
+use super::ZGen;
 
 pub struct ZVisitorError(pub String);
 
@@ -1230,17 +1231,25 @@ pub fn walk_iteration_statement<'ast, Z: ZVisitorMut<'ast>>(
 // *************************
 
 pub(super) struct ZStatementWalker<'ast, 'ret> {
-    ret_tys: &'ret [ast::Type<'ast>],
-    vars: HashMap<String, ast::Type<'ast>>,
+    rets: &'ret [ast::Type<'ast>],
+    gens: &'ret [ast::IdentifierExpression<'ast>],
+    zgen: &'ret ZGen<'ast>,
+    vars: Vec<HashMap<String, ast::Type<'ast>>>,
     rewriter: ZConstLiteralRewriter,
 }
 
 impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
-    pub fn new(ret_tys: &'ret [ast::Type<'ast>]) -> Self {
-        let vars = HashMap::new();
+    pub fn new(
+        rets: &'ret [ast::Type<'ast>],
+        gens: &'ret [ast::IdentifierExpression<'ast>],
+        zgen: &'ret ZGen<'ast>,
+    ) -> Self {
+        let vars = vec![HashMap::new()];
         let rewriter = ZConstLiteralRewriter::new(None);
         Self {
-            ret_tys,
+            rets,
+            gens,
+            zgen,
             vars,
             rewriter,
         }
@@ -1255,25 +1264,96 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         // XXX rewriter using ast::Type instead?
         self.rewriter.visit_expression(expr)
     }
+
+    fn generic_defined(&self, id: &String) -> bool {
+        // XXX(perf) if self.gens is long this could be improved with a HashSet.
+        // Realistically, a function will have a small number of generic params.
+        self.gens.iter().any(|g| &g.value == id)
+    }
+
+    fn var_defined(&self, id: &String) -> bool {
+        self.vars.iter().rev().any(|v| v.contains_key(id))
+    }
+
+    fn lookup_var(&self, nm: &String) -> Option<ast::Type<'ast>> {
+        self.vars.iter().rev().find_map(|v| v.get(nm).cloned())
+    }
+
+    fn lookup_type(&self, id: &ast::IdentifierExpression<'ast>) -> Option<ast::Type<'ast>> {
+        if self.generic_defined(&id.value) {
+            // generics are always U32
+            Some(ast::Type::Basic(ast::BasicType::U32(ast::U32Type {
+                span: id.span.clone(),
+            })))
+        } else if let Some(t) = self.zgen.const_ty_lookup_(id.value.as_ref()) {
+            Some(t.clone())
+        } else {
+            self.lookup_var(&id.value)
+        }
+    }
+
+    fn apply_varonly<F, R>(&mut self, nm: &String, f: F) -> Result<R, ZVisitorError>
+    where
+        F: FnOnce(&mut Self, &String) -> R,
+    {
+        if self.generic_defined(nm) {
+            Err(ZVisitorError(format!(
+                "ZStatementWalker: attempted to shadow generic {}",
+                nm,
+            )))
+        } else if self.zgen.const_lookup_(nm.as_ref()).is_some() {
+            Err(ZVisitorError(format!(
+                "ZStatementWalker: attempted to shadow const {}",
+                nm,
+            )))
+        } else {
+            Ok(f(self, nm))
+        }
+    }
+
+    fn lookup_type_varonly(
+        &mut self,
+        nm: &String,
+    ) -> Result<Option<ast::Type<'ast>>, ZVisitorError> {
+        self.apply_varonly(nm, |s, nm| s.lookup_var(nm))
+    }
+
+    fn insert_var(
+        &mut self,
+        nm: &String,
+        ty: ast::Type<'ast>,
+    ) -> Result<Option<ast::Type<'ast>>, ZVisitorError> {
+        self.apply_varonly(nm, |s, nm| {
+            s.vars.last_mut().unwrap().insert(nm.clone(), ty)
+        })
+    }
+
+    fn push_scope(&mut self) {
+        self.vars.push(HashMap::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.vars.pop();
+    }
 }
 
 impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
     fn visit_return_statement(&mut self, ret: &mut ast::ReturnStatement<'ast>) -> ZVisitorResult {
-        if self.ret_tys.len() != ret.expressions.len() {
+        if self.rets.len() != ret.expressions.len() {
             return Err(ZVisitorError(
                 "ZStatementWalker: mismatched return expression/type".to_owned(),
             ));
         }
 
         // XXX(unimpl) multi-return statements not supported
-        if self.ret_tys.len() > 1 {
+        if self.rets.len() > 1 {
             return Err(ZVisitorError(
                 "ZStatementWalker: multi-returns not supported".to_owned(),
             ));
         }
 
         if let Some(expr) = ret.expressions.first_mut() {
-            self.unify(self.ret_tys.first().cloned(), expr)?;
+            self.unify(self.rets.first().cloned(), expr)?;
         }
         walk_return_statement(self, ret)
     }
@@ -1282,10 +1362,10 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
         &mut self,
         asrt: &mut ast::AssertionStatement<'ast>,
     ) -> ZVisitorResult {
-        let ty = ast::Type::Basic(ast::BasicType::Boolean(ast::BooleanType {
+        let bool_ty = ast::Type::Basic(ast::BasicType::Boolean(ast::BooleanType {
             span: asrt.span.clone(),
         }));
-        self.unify(Some(ty), &mut asrt.expression)?;
+        self.unify(Some(bool_ty), &mut asrt.expression)?;
         walk_assertion_statement(self, asrt)
     }
 
@@ -1293,8 +1373,24 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
         &mut self,
         iter: &mut ast::IterationStatement<'ast>,
     ) -> ZVisitorResult {
-        // XXX(TODO)
-        walk_iteration_statement(self, iter)
+        self.visit_type(&mut iter.ty)?;
+
+        self.push_scope(); // {
+        self.insert_var(&iter.index.value, iter.ty.clone())?;
+        self.visit_identifier_expression(&mut iter.index)?;
+
+        // type propagation for index expressions
+        self.unify(Some(iter.ty.clone()), &mut iter.from)?;
+        self.visit_expression(&mut iter.from)?;
+        self.unify(Some(iter.ty.clone()), &mut iter.to)?;
+        self.visit_expression(&mut iter.to)?;
+
+        iter.statements
+            .iter_mut()
+            .try_for_each(|s| self.visit_statement(s))?;
+
+        self.pop_scope(); // }
+        self.visit_span(&mut iter.span)
     }
 
     fn visit_definition_statement(
@@ -1317,13 +1413,12 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
             .first()
             .map(|tioa| {
                 use ast::TypedIdentifierOrAssignee::*;
-                self.vars
-                    .get(match tioa {
-                        Assignee(a) => &a.id.value,
-                        TypedIdentifier(ti) => &ti.identifier.value,
-                    })
-                    .cloned()
+                self.lookup_type_varonly(match tioa {
+                    Assignee(a) => &a.id.value,
+                    TypedIdentifier(ti) => &ti.identifier.value,
+                })
             })
+            .transpose()?
             .flatten();
         self.unify(ty, &mut def.expression)?;
         self.visit_expression(&mut def.expression)?;
@@ -1338,7 +1433,7 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
         match tioa {
             Assignee(a) => {
                 // XXX(rsw) do we want to / can we validate the access chain?
-                if !self.vars.contains_key(&a.id.value) {
+                if !self.var_defined(&a.id.value) {
                     Err(ZVisitorError(format!(
                         "ZStatementWalker: assignment to undeclared variable {}",
                         &a.id.value
@@ -1348,7 +1443,7 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
                 }
             }
             TypedIdentifier(ti) => {
-                self.vars.insert(ti.identifier.value.clone(), ti.ty.clone());
+                self.insert_var(&ti.identifier.value, ti.ty.clone())?;
                 self.visit_typed_identifier(ti)
             }
         }
@@ -1357,23 +1452,21 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
 
 pub(super) struct ZConstLiteralRewriter {
     to_ty: Option<Ty>,
-    //found: bool,
+    found: bool,
 }
 
 impl ZConstLiteralRewriter {
     pub fn new(to_ty: Option<Ty>) -> Self {
         Self {
             to_ty,
-            //found: false,
+            found: false,
         }
     }
 
-    /*
     #[allow(dead_code)]
     pub fn found(&self) -> bool {
         self.found
     }
-    */
 
     pub fn replace(&mut self, to_ty: Option<Ty>) -> Option<Ty> {
         std::mem::replace(&mut self.to_ty, to_ty)
@@ -1384,8 +1477,12 @@ impl<'ast> ZVisitorMut<'ast> for ZConstLiteralRewriter {
     /*
     Expressions can be any of:
 
-    Ternary(TernaryExpression<'ast>),
     Binary(BinaryExpression<'ast>),
+        -> depends on operator. e.g., == outputs Bool but takes in arbitrary l and r
+
+    Ternary(TernaryExpression<'ast>)
+        -> first expr is Bool, other two are expected type
+
     Unary(UnaryExpression<'ast>),
         -> no change to expected type: each sub-expr should have the expected type
 
@@ -1409,12 +1506,43 @@ impl<'ast> ZVisitorMut<'ast> for ZConstLiteralRewriter {
         -> count should have type Field
     */
 
+    fn visit_ternary_expression(
+        &mut self,
+        te: &mut ast::TernaryExpression<'ast>,
+    ) -> ZVisitorResult {
+        // first expression in a ternary should have type bool
+        let to_ty = self.replace(Some(Ty::Bool));
+        self.visit_expression(&mut te.first)?;
+        self.replace(to_ty);
+        self.visit_expression(&mut te.second)?;
+        self.visit_expression(&mut te.third)?;
+        self.visit_span(&mut te.span)
+    }
+
+    fn visit_binary_expression(&mut self, be: &mut ast::BinaryExpression<'ast>) -> ZVisitorResult {
+        let (ty_l, ty_r) = {
+            use ast::BinaryOperator::*;
+            match be.op {
+                Pow | RightShift | LeftShift => (self.to_ty.clone(), Some(Ty::Uint(32))),
+                Eq | NotEq | Lt | Gt | Lte | Gte => (None, None),
+                _ => (self.to_ty.clone(), self.to_ty.clone()),
+            }
+        };
+        self.visit_binary_operator(&mut be.op)?;
+        let to_ty = self.replace(ty_l);
+        self.visit_expression(&mut be.left)?;
+        self.replace(ty_r);
+        self.visit_expression(&mut be.right)?;
+        self.replace(to_ty);
+        self.visit_span(&mut be.span)
+    }
+
     fn visit_decimal_literal_expression(
         &mut self,
         dle: &mut ast::DecimalLiteralExpression<'ast>,
     ) -> ZVisitorResult {
         if dle.suffix.is_none() && self.to_ty.is_some() {
-            //self.found = true;
+            self.found = true;
             dle.suffix.replace(match self.to_ty.as_ref().unwrap() {
                 Ty::Uint(8) => Ok(ast::DecimalSuffix::U8(ast::U8Suffix {
                     span: dle.span.clone(),
@@ -1435,7 +1563,7 @@ impl<'ast> ZVisitorMut<'ast> for ZConstLiteralRewriter {
                     span: dle.span.clone(),
                 })),
                 _ => Err(ZVisitorError(
-                    "ZConstLiteralRewriter: tried to rewrite DecimalLiteralExpression to complex type"
+                    "ZConstLiteralRewriter: rewriting DecimalLiteralExpression to incompatible type"
                         .to_owned(),
                 )),
             }?);
@@ -1454,7 +1582,10 @@ impl<'ast> ZVisitorMut<'ast> for ZConstLiteralRewriter {
                 self.visit_expression(&mut aie.value)?;
                 self.to_ty = to_ty;
             } else {
-                return Err(ZVisitorError("ZConstLiteralRewriter: tried to rewrite ArrayInitializerExpression to non-Array type".to_string()));
+                return Err(ZVisitorError(
+                    "ZConstLiteralRewriter: rewriting ArrayInitializerExpression to non-Array type"
+                        .to_string(),
+                ));
             }
         }
 
@@ -1498,7 +1629,7 @@ impl<'ast> ZVisitorMut<'ast> for ZConstLiteralRewriter {
                 Ok(Some(*arr_ty))
             } else {
                 Err(ZVisitorError(
-                    "ZConstLiteralWriter: tried to rewrite InlineArrayExpression to non-Array type"
+                    "ZConstLiteralWriter: rewriting InlineArrayExpression to non-Array type"
                         .to_string(),
                 ))
             }
