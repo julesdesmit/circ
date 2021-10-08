@@ -1,6 +1,7 @@
 //! AST Walker for zokrates_pest_ast
 #![allow(missing_docs)]
 
+use log::debug;
 use std::collections::HashMap;
 use zokrates_pest_ast as ast;
 
@@ -1265,6 +1266,15 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         self.rewriter.visit_expression(expr)
     }
 
+    fn walk_accesses(
+        &mut self,
+        ty: ast::Type<'ast>,
+        acc: &[ast::AssigneeAccess<'ast>],
+    ) -> ast::Type<'ast> {
+        // XXX(TODO)
+        ty
+    }
+
     fn generic_defined(&self, id: &String) -> bool {
         // XXX(perf) if self.gens is long this could be improved with a HashSet.
         // Realistically, a function will have a small number of generic params.
@@ -1413,14 +1423,26 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
             .first()
             .map(|tioa| {
                 use ast::TypedIdentifierOrAssignee::*;
-                self.lookup_type_varonly(match tioa {
-                    Assignee(a) => &a.id.value,
-                    TypedIdentifier(ti) => &ti.identifier.value,
-                })
+                let (na, acc) = match tioa {
+                    Assignee(a) => (&a.id.value, &a.accesses[..]),
+                    TypedIdentifier(ti) => {
+                        (&ti.identifier.value, &[] as &[ast::AssigneeAccess<'ast>])
+                    }
+                };
+                self.lookup_type_varonly(na).map(|t| t.map(|t| (t, acc)))
             })
             .transpose()?
             .flatten();
-        self.unify(ty, &mut def.expression)?;
+        if let Some((ty, acc)) = ty {
+            let ty = self.walk_accesses(ty, acc);
+            self.unify(Some(ty), &mut def.expression)?;
+        } else {
+            debug!(
+                "Warning: found expression with no LHS (maybe)\n{:#?}",
+                def.span
+            );
+            self.unify(None, &mut def.expression)?;
+        }
         self.visit_expression(&mut def.expression)?;
         self.visit_span(&mut def.span)
     }
