@@ -1284,6 +1284,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                     use ast::RangeOrExpression::*;
                     ty = match &aacc.expression {
                         Range(r) => {
+                            // XXX(question): range checks here?
                             let from = Box::new(if let Some(f) = &r.from {
                                 f.0.clone()
                             } else {
