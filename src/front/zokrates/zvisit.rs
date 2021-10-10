@@ -1268,24 +1268,109 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
 
     fn walk_accesses(
         &mut self,
-        ty: ast::Type<'ast>,
-        acc: &[ast::AssigneeAccess<'ast>],
-    ) -> ast::Type<'ast> {
-        // XXX(TODO)
-        ty
+        mut ty: ast::Type<'ast>,
+        accs: &[ast::AssigneeAccess<'ast>],
+    ) -> Result<ast::Type<'ast>, ZVisitorError> {
+        use ast::{AssigneeAccess::*, BasicOrStructType, Type};
+        let mut acc_dim_offset = 0;
+        for acc in accs {
+            if matches!(ty, Type::Basic(_)) {
+                return Err(ZVisitorError(
+                    "ZStatementWalker: tried to walk accesses into a Basic type".to_string(),
+                ));
+            }
+            if let Select(aacc) = acc {
+                if let Type::Array(aty) = ty {
+                    use ast::RangeOrExpression::*;
+                    ty = match &aacc.expression {
+                        Range(r) => {
+                            let from = Box::new(if let Some(f) = &r.from {
+                                f.0.clone()
+                            } else {
+                                let f_expr = ast::U32NumberExpression {
+                                    value: "0x0000".to_string(),
+                                    span: r.span.clone(),
+                                };
+                                let f_hlit = ast::HexLiteralExpression {
+                                    value: ast::HexNumberExpression::U32(f_expr),
+                                    span: r.span.clone(),
+                                };
+                                let f_lexp = ast::LiteralExpression::HexLiteral(f_hlit);
+                                ast::Expression::Literal(f_lexp)
+                            });
+                            let to = Box::new(if let Some(t) = &r.to {
+                                t.0.clone()
+                            } else {
+                                aty.dimensions[acc_dim_offset].clone()
+                            });
+                            let r_bexp = ast::BinaryExpression{
+                                op: ast::BinaryOperator::Sub,
+                                left: to,
+                                right: from,
+                                span: r.span.clone(),
+                            };
+                            let mut aty = aty;
+                            aty.dimensions[acc_dim_offset] = ast::Expression::Binary(r_bexp);
+                            Type::Array(aty)
+                        }
+                        Expression(_) => {
+                            if aty.dimensions.len() - acc_dim_offset > 1 {
+                                acc_dim_offset += 1;
+                                Type::Array(aty)
+                            } else {
+                                acc_dim_offset = 0;
+                                match aty.ty {
+                                    BasicOrStructType::Basic(b) => Type::Basic(b),
+                                    BasicOrStructType::Struct(s) => Type::Struct(s),
+                                }
+                            }
+                        }
+                    };
+                } else {
+                    return Err(ZVisitorError(
+                        "ZStatementWalker: tried to access an Array as a Struct".to_string(),
+                    ));
+                }
+            }
+            if let Member(macc) = acc {
+                ty = if let Type::Struct(sty) = ty {
+                    // XXX(TODO)
+                    Type::Struct(sty)
+                } else {
+                    return Err(ZVisitorError(
+                        "ZStatementWalker: tried to access a Struct as an Array".to_string(),
+                    ));
+                };
+            }
+        }
+
+        // handle any dimensional readjustments we've delayed
+        if acc_dim_offset > 0 {
+            ty = if let Type::Array(mut aty) = ty {
+                Type::Array(ast::ArrayType {
+                    ty: aty.ty,
+                    dimensions: aty.dimensions.drain(acc_dim_offset..).collect(),
+                    span: aty.span,
+                })
+            } else {
+                unreachable!("acc_dim_offset != 0 when ty not Array");
+            }
+        }
+
+        Ok(ty)
     }
 
-    fn generic_defined(&self, id: &String) -> bool {
+    fn generic_defined(&self, id: &str) -> bool {
         // XXX(perf) if self.gens is long this could be improved with a HashSet.
         // Realistically, a function will have a small number of generic params.
         self.gens.iter().any(|g| &g.value == id)
     }
 
-    fn var_defined(&self, id: &String) -> bool {
+    fn var_defined(&self, id: &str) -> bool {
         self.vars.iter().rev().any(|v| v.contains_key(id))
     }
 
-    fn lookup_var(&self, nm: &String) -> Option<ast::Type<'ast>> {
+    fn lookup_var(&self, nm: &str) -> Option<ast::Type<'ast>> {
         self.vars.iter().rev().find_map(|v| v.get(nm).cloned())
     }
 
@@ -1302,9 +1387,9 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         }
     }
 
-    fn apply_varonly<F, R>(&mut self, nm: &String, f: F) -> Result<R, ZVisitorError>
+    fn apply_varonly<F, R>(&mut self, nm: &str, f: F) -> Result<R, ZVisitorError>
     where
-        F: FnOnce(&mut Self, &String) -> R,
+        F: FnOnce(&mut Self, &str) -> R,
     {
         if self.generic_defined(nm) {
             Err(ZVisitorError(format!(
@@ -1321,20 +1406,17 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         }
     }
 
-    fn lookup_type_varonly(
-        &mut self,
-        nm: &String,
-    ) -> Result<Option<ast::Type<'ast>>, ZVisitorError> {
+    fn lookup_type_varonly(&mut self, nm: &str) -> Result<Option<ast::Type<'ast>>, ZVisitorError> {
         self.apply_varonly(nm, |s, nm| s.lookup_var(nm))
     }
 
     fn insert_var(
         &mut self,
-        nm: &String,
+        nm: &str,
         ty: ast::Type<'ast>,
     ) -> Result<Option<ast::Type<'ast>>, ZVisitorError> {
         self.apply_varonly(nm, |s, nm| {
-            s.vars.last_mut().unwrap().insert(nm.clone(), ty)
+            s.vars.last_mut().unwrap().insert(nm.to_string(), ty)
         })
     }
 
@@ -1434,7 +1516,7 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
             .transpose()?
             .flatten();
         if let Some((ty, acc)) = ty {
-            let ty = self.walk_accesses(ty, acc);
+            let ty = self.walk_accesses(ty, acc)?;
             self.unify(Some(ty), &mut def.expression)?;
         } else {
             debug!(
