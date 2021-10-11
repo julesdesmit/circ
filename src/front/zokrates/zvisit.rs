@@ -1304,7 +1304,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                             } else {
                                 aty.dimensions[acc_dim_offset].clone()
                             });
-                            let r_bexp = ast::BinaryExpression{
+                            let r_bexp = ast::BinaryExpression {
                                 op: ast::BinaryOperator::Sub,
                                 left: to,
                                 right: from,
@@ -1351,18 +1351,33 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                  *   Maybe not...
                  */
                 ty = if let Type::Struct(sty) = ty {
-                    /*
-                    let sdef = self.zgen.structs.get(&sty.id.value)
-                        .unwrap_or_else(|| Err(ZVisitorError(format!(
+                    let sdef = self.zgen.get_struct(&sty.id.value).ok_or_else(|| {
+                        ZVisitorError(format!(
                             "ZStatementWalker: undeclared struct type {}",
                             &sty.id.value,
-                        ))));
-                    */
+                        ))
+                    })?;
                     if sty.id.value.contains('*') {
-                        // this is a monomorphized generic
+                        if sty.explicit_generics.is_none() {
+                            return Err(ZVisitorError(format!(
+                                "ZStatementWalker: supposedly monomorphized struct {} lacks generics",
+                                &sty.id.value,
+                            )));
+                        }
+                        if sty.explicit_generics.as_ref().unwrap().values.len()
+                            != sdef.generics.len()
+                        {
+                            return Err(ZVisitorError(format!(
+                                "ZStatementWalker: monomorphized struct {} has wrong #generics",
+                                &sty.id.value,
+                            )));
+                        }
+                        // XXX(TODO) handle generics?
                     } else {
-                        
+                        assert!(sdef.generics.is_empty());
                     }
+
+                    // XXX(TODO)
 
                     Type::Struct(sty)
                 } else {
