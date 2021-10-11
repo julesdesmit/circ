@@ -1234,7 +1234,7 @@ pub fn walk_iteration_statement<'ast, Z: ZVisitorMut<'ast>>(
 pub(super) struct ZStatementWalker<'ast, 'ret> {
     rets: &'ret [ast::Type<'ast>],
     gens: &'ret [ast::IdentifierExpression<'ast>],
-    zgen: &'ret ZGen<'ast>,
+    zgen: &'ret mut ZGen<'ast>,
     vars: Vec<HashMap<String, ast::Type<'ast>>>,
     rewriter: ZConstLiteralRewriter,
 }
@@ -1243,7 +1243,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
     pub fn new(
         rets: &'ret [ast::Type<'ast>],
         gens: &'ret [ast::IdentifierExpression<'ast>],
-        zgen: &'ret ZGen<'ast>,
+        zgen: &'ret mut ZGen<'ast>,
     ) -> Self {
         let vars = vec![HashMap::new()];
         let rewriter = ZConstLiteralRewriter::new(None);
@@ -1334,8 +1334,36 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                 }
             }
             if let Member(macc) = acc {
+                /*
+                 * For generics, mangle names, save new structs, and change
+                 * types in the AST accordingly.
+                 *
+                 * Do this in a few steps:
+                 * - when encountering a DefinitionStatement (in the walker),
+                 *   any generic struct always gets mangled to a unique name
+                 *   (XXX figure out how to choose unique name) but not yet
+                 *   monomorpnized. Rewrite AST to use mangled name.
+                 *
+                 * - As we walk and unify, monomorphize by modifying the struct
+                 *   definition itself. (Are these stored in ZGen??? I think so...)
+                 *
+                 * - XXX do we need to require explicit generics on LHS of defs?
+                 *   Maybe not...
+                 */
                 ty = if let Type::Struct(sty) = ty {
-                    // XXX(TODO)
+                    /*
+                    let sdef = self.zgen.structs.get(&sty.id.value)
+                        .unwrap_or_else(|| Err(ZVisitorError(format!(
+                            "ZStatementWalker: undeclared struct type {}",
+                            &sty.id.value,
+                        ))));
+                    */
+                    if sty.id.value.contains('*') {
+                        // this is a monomorphized generic
+                    } else {
+                        
+                    }
+
                     Type::Struct(sty)
                 } else {
                     return Err(ZVisitorError(
@@ -1501,7 +1529,7 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
                 "ZStatementWalker: multi-LHS assignments not supported".to_owned(),
             ));
         }
-        let ty = def
+        let ty_accs = def
             .lhs
             .first()
             .map(|tioa| {
@@ -1516,8 +1544,8 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
             })
             .transpose()?
             .flatten();
-        if let Some((ty, acc)) = ty {
-            let ty = self.walk_accesses(ty, acc)?;
+        if let Some((ty, accs)) = ty_accs {
+            let ty = self.walk_accesses(ty, accs)?;
             self.unify(Some(ty), &mut def.expression)?;
         } else {
             debug!(

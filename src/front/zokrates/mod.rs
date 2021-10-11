@@ -99,10 +99,10 @@ struct ZGen<'ast> {
     asts: HashMap<PathBuf, ast::File<'ast>>,
     file_stack: Vec<PathBuf>,
     generics_stack: Vec<HashMap<String, T>>,
-    functions: HashMap<(PathBuf, String), ast::FunctionDefinition<'ast>>,
-    structs: HashMap<(PathBuf, String), ast::StructDefinition<'ast>>,
-    constants: HashMap<(PathBuf, String), (ast::Type<'ast>, T)>,
-    import_map: HashMap<(PathBuf, String), (PathBuf, String)>,
+    functions: HashMap<PathBuf, HashMap<String, ast::FunctionDefinition<'ast>>>,
+    structs: HashMap<PathBuf, HashMap<String, ast::StructDefinition<'ast>>>,
+    constants: HashMap<PathBuf, HashMap<String, (ast::Type<'ast>, T)>>,
+    import_map: HashMap<PathBuf, HashMap<String, (PathBuf, String)>>,
     mode: Mode,
 }
 
@@ -441,7 +441,7 @@ impl<'ast> ZGen<'ast> {
                 // XXX(rsw) is this a reasonable assumption? probably...
                 let (base, accs) = if let Some(ast::Access::Call(c)) = p.accesses.first() {
                     debug!("Call: {}", p.id.value);
-                    let (f_path, f_name) = self.deref_import(p.id.value.clone());
+                    let (f_path, f_name) = self.deref_import(&p.id.value);
                     let args = c
                         .arguments
                         .expressions
@@ -460,11 +460,16 @@ impl<'ast> ZGen<'ast> {
                         }
                         Self::builtin_call(f_path.to_str().unwrap(), args).unwrap()
                     } else {
-                        let p = (f_path, f_name);
                         let f = self
                             .functions
-                            .get(&p)
-                            .unwrap_or_else(|| panic!("No function '{}'", p.1))
+                            .get(&f_path)
+                            .unwrap_or_else(|| {
+                                self.err(format!("No file '{:?}'", &f_path), &p.span)
+                            })
+                            .get(&f_name)
+                            .unwrap_or_else(|| {
+                                self.err(format!("No function '{}'", &f_name), &p.span)
+                            })
                             .clone();
                         if f.generics.len()
                             != c.explicit_generics
@@ -474,7 +479,7 @@ impl<'ast> ZGen<'ast> {
                         {
                             self.err("cannot determine generic params for function call", &c.span);
                         }
-                        self.file_stack.push(p.0);
+                        self.file_stack.push(f_path);
                         self.generics_stack.push(
                             c.explicit_generics
                                 .as_ref()
@@ -516,7 +521,7 @@ impl<'ast> ZGen<'ast> {
                         // XXX(unimpl) tuple returns not supported
                         assert!(f.returns.len() <= 1);
                         let ret_ty = f.returns.first().map(|r| self.type_(r));
-                        self.circ.enter_fn(p.1, ret_ty);
+                        self.circ.enter_fn(f_name, ret_ty);
                         assert_eq!(f.parameters.len(), args.len());
                         for (p, a) in f.parameters.iter().zip(args) {
                             let ty = self.type_(&p.ty);
@@ -567,11 +572,13 @@ impl<'ast> ZGen<'ast> {
     fn entry_fn(&mut self, n: &str) {
         debug!("Entry: {}", n);
         // find the entry function
-        let p = self.deref_import(n.to_owned());
+        let (f_file, f_name) = self.deref_import(n);
         let f = self
             .functions
-            .get(&p)
-            .unwrap_or_else(|| panic!("No function '{}'", p.1))
+            .get(&f_file)
+            .unwrap_or_else(|| panic!("No file '{:?}'", &f_file))
+            .get(&f_name)
+            .unwrap_or_else(|| panic!("No function '{}'", &f_name))
             .clone();
         // XXX(unimpl) tuple returns not supported
         assert!(f.returns.len() <= 1);
@@ -699,10 +706,13 @@ impl<'ast> ZGen<'ast> {
         p.pop();
         p
     }
-    fn deref_import(&self, s: String) -> (PathBuf, String) {
+    fn deref_import(&self, s: &str) -> (PathBuf, String) {
         // import map is flattened, so we only need to chase through at most one indirection
-        let r = (self.cur_path().to_path_buf(), s);
-        self.import_map.get(&r).cloned().unwrap_or(r)
+        self.import_map
+            .get(self.cur_path())
+            .and_then(|m| m.get(s))
+            .cloned()
+            .unwrap_or_else(|| (self.cur_path().to_path_buf(), s.to_string()))
     }
 
     fn const_int(&mut self, e: &ast::Expression<'ast>) -> isize {
@@ -715,14 +725,18 @@ impl<'ast> ZGen<'ast> {
     }
 
     fn const_ty_lookup_(&self, i: &str) -> Option<&ast::Type<'ast>> {
+        let (f_file, f_name) = self.deref_import(i);
         self.constants
-            .get(&self.deref_import(i.to_string()))
+            .get(&f_file)
+            .and_then(|m| m.get(&f_name))
             .map(|(t, _)| t)
     }
 
     fn const_lookup_(&self, i: &str) -> Option<&T> {
+        let (f_file, f_name) = self.deref_import(i);
         self.constants
-            .get(&self.deref_import(i.to_string()))
+            .get(&f_file)
+            .and_then(|m| m.get(&f_name))
             .map(|(_, v)| v)
     }
 
@@ -838,7 +852,9 @@ impl<'ast> ZGen<'ast> {
         // make sure that this wasn't already an important const name
         if self
             .import_map
-            .contains_key(&(self.cur_path().to_path_buf(), c.id.value.clone()))
+            .get(self.cur_path())
+            .and_then(|m| Some(m.contains_key(&c.id.value)))
+            .unwrap_or(false)
         {
             self.err(
                 format!("Constant {} redefined after import", &c.id.value),
@@ -859,10 +875,11 @@ impl<'ast> ZGen<'ast> {
         }
 
         // insert into constant map
-        let path = self.cur_path().to_owned();
         if self
             .constants
-            .insert((path, c.id.value.clone()), (c.ty.clone(), value))
+            .get_mut(self.file_stack.last().unwrap())
+            .unwrap()
+            .insert(c.id.value.clone(), (c.ty.clone(), value))
             .is_some()
         {
             self.err(format!("Constant {} redefined", &c.id.value), &c.span);
@@ -895,28 +912,40 @@ impl<'ast> ZGen<'ast> {
     }
 
     fn flatten_import_map(&mut self) {
+        // create a new map
         let mut new_map = HashMap::with_capacity(self.import_map.len());
+        self.import_map.keys().for_each(|k| {
+            new_map.insert(k.clone(), HashMap::new());
+        });
 
         let mut visited = Vec::new();
-        for (key, val) in &self.import_map {
-            // may have visited this value already as part of a prior pointer chase
-            if new_map.contains_key(key) {
-                continue;
-            }
+        for (fname, map) in &self.import_map {
+            for (iname, (nv, iv)) in map.iter() {
+                // unwrap is safe because of new_map's initialization above
+                if new_map.get(fname).unwrap().contains_key(iname) {
+                    // visited this value already as part of a prior pointer chase
+                    continue;
+                }
 
-            // chase the pointer, writing down every visited key along the way
-            visited.clear();
-            visited.push(key);
-            let mut v = val;
-            while let Some(vv) = self.import_map.get(v) {
-                visited.push(v);
-                v = vv;
-            }
+                // chase the pointer, writing down every visited key along the way
+                visited.clear();
+                visited.push((fname, iname));
+                let mut n = nv;
+                let mut i = iv;
+                while let Some((nn, ii)) = self.import_map.get(n).unwrap().get(i) {
+                    visited.push((n, i));
+                    n = nn;
+                    i = ii;
+                }
 
-            // map every visited key to the final value in the ptr chase
-            visited.iter().for_each(|&k| {
-                new_map.insert(k.clone(), v.clone());
-            });
+                // map every visited key to the final value in the ptr chase
+                visited.iter().for_each(|&(nn, ii)| {
+                    new_map
+                        .get_mut(nn)
+                        .unwrap()
+                        .insert(ii.clone(), (n.clone(), i.clone()));
+                });
+            }
         }
 
         self.import_map = new_map;
@@ -948,6 +977,8 @@ impl<'ast> ZGen<'ast> {
 
         for (p, f) in asts.iter() {
             self.file_stack.push(p.to_owned());
+            let mut imap = HashMap::new();
+
             if !gn.contains_key(p) {
                 gn.insert(p.to_owned(), ig.add_node(p.to_owned()));
             }
@@ -997,10 +1028,7 @@ impl<'ast> ZGen<'ast> {
                         .into_iter()
                         .zip(dst_names.into_iter())
                         .for_each(|(sn, dn)| {
-                            self.import_map.insert(
-                                (self.cur_path().to_path_buf(), dn),
-                                (abs_src_path.clone(), sn),
-                            );
+                            imap.insert(dn, (abs_src_path.clone(), sn));
                         });
 
                     // add included -> includer edge for later toposort
@@ -1011,7 +1039,8 @@ impl<'ast> ZGen<'ast> {
                 }
             }
 
-            self.file_stack.pop();
+            let p = self.file_stack.pop().unwrap();
+            self.import_map.insert(p, imap);
         }
         self.asts = asts;
 
@@ -1035,6 +1064,7 @@ impl<'ast> ZGen<'ast> {
     fn visit_constants(&mut self, files: Vec<PathBuf>) {
         let mut t = std::mem::take(&mut self.asts);
         for p in files {
+            self.constants.insert(p.clone(), HashMap::new());
             self.file_stack.push(p);
             for d in t.get_mut(self.cur_path()).unwrap().declarations.iter_mut() {
                 if let ast::SymbolDeclaration::Constant(c) = d {
@@ -1047,9 +1077,22 @@ impl<'ast> ZGen<'ast> {
         self.asts = t;
     }
 
+    fn get_struct(&self, struct_id: &str) -> Option<&ast::StructDefinition<'ast>> {
+        let (s_path, s_name) = self.deref_import(struct_id);
+        self.structs.get(&s_path).and_then(|m| m.get(&s_name))
+    }
+
+    fn get_struct_mut(&mut self, struct_id: &str) -> Option<&mut ast::StructDefinition<'ast>> {
+        let (s_path, s_name) = self.deref_import(struct_id);
+        self.structs
+            .get_mut(&s_path)
+            .and_then(|m| m.get_mut(&s_name))
+    }
+
     fn visit_structs(&mut self, files: Vec<PathBuf>) {
         let t = std::mem::take(&mut self.asts);
         for p in files {
+            self.structs.insert(p.clone(), HashMap::new());
             self.file_stack.push(p);
             for d in t.get(self.cur_path()).unwrap().declarations.iter() {
                 if let ast::SymbolDeclaration::Struct(s) = d {
@@ -1062,7 +1105,9 @@ impl<'ast> ZGen<'ast> {
                         .unwrap_or_else(|e| self.err(e.0, &s.span));
 
                     self.structs
-                        .insert((self.cur_path().to_owned(), s.id.value.clone()), s_ast);
+                        .get_mut(self.file_stack.last().unwrap())
+                        .unwrap()
+                        .insert(s.id.value.clone(), s_ast);
                 }
             }
             self.file_stack.pop();
@@ -1073,6 +1118,7 @@ impl<'ast> ZGen<'ast> {
     fn visit_functions(&mut self, files: Vec<PathBuf>) {
         let t = std::mem::take(&mut self.asts);
         for p in files {
+            self.functions.insert(p.clone(), HashMap::new());
             self.file_stack.push(p);
             for d in t.get(self.cur_path()).unwrap().declarations.iter() {
                 if let ast::SymbolDeclaration::Function(f) = d {
@@ -1105,7 +1151,9 @@ impl<'ast> ZGen<'ast> {
                         .unwrap_or_else(|e| self.err(e.0, &f.span));
 
                     self.functions
-                        .insert((self.cur_path().to_owned(), f.id.value.clone()), f_ast);
+                        .get_mut(self.file_stack.last().unwrap())
+                        .unwrap()
+                        .insert(f.id.value.clone(), f_ast);
                 }
             }
         }
