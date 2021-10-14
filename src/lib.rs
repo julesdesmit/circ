@@ -2,8 +2,9 @@
 //!
 //! A compiler infrastructure for compiling programs to circuits
 
-#![feature(drain_filter)]
 #![feature(box_patterns)]
+#![feature(drain_filter)]
+#![feature(iter_intersperse)]
 #![warn(missing_docs)]
 
 #[macro_use]

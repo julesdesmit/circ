@@ -1,7 +1,6 @@
 //! AST Walker for zokrates_pest_ast
 #![allow(missing_docs)]
 
-use log::debug;
 use std::collections::HashMap;
 use zokrates_pest_ast as ast;
 
@@ -9,8 +8,8 @@ use super::term::Ty;
 use super::ZGen;
 
 pub struct ZVisitorError(pub String);
-
-pub type ZVisitorResult = Result<(), ZVisitorError>;
+pub type ZResult<T> = Result<T, ZVisitorError>;
+pub type ZVisitorResult = ZResult<()>;
 
 pub trait ZVisitorMut<'ast>: Sized {
     fn visit_file(&mut self, file: &mut ast::File<'ast>) -> ZVisitorResult {
@@ -1231,12 +1230,40 @@ pub fn walk_iteration_statement<'ast, Z: ZVisitorMut<'ast>>(
 
 // *************************
 
+struct ZStructRewriter<'ast> {
+    gvmap: HashMap<String, ast::Expression<'ast>>,
+}
+
+impl<'ast> ZVisitorMut<'ast> for ZStructRewriter<'ast> {
+    fn visit_expression(&mut self, expr: &mut ast::Expression<'ast>) -> ZVisitorResult {
+        use ast::Expression::*;
+        match expr {
+            Ternary(te) => self.visit_ternary_expression(te),
+            Binary(be) => self.visit_binary_expression(be),
+            Unary(ue) => self.visit_unary_expression(ue),
+            Postfix(pe) => self.visit_postfix_expression(pe),
+            Literal(le) => self.visit_literal_expression(le),
+            InlineArray(iae) => self.visit_inline_array_expression(iae),
+            InlineStruct(ise) => self.visit_inline_struct_expression(ise),
+            ArrayInitializer(aie) => self.visit_array_initializer_expression(aie),
+            Identifier(ie) => {
+                if let Some(e) = self.gvmap.get(&ie.value) {
+                    *expr = e.clone();
+                    Ok(())
+                } else {
+                    self.visit_identifier_expression(ie)
+                }
+            }
+        }
+    }
+}
+
 pub(super) struct ZStatementWalker<'ast, 'ret> {
     rets: &'ret [ast::Type<'ast>],
     gens: &'ret [ast::IdentifierExpression<'ast>],
     zgen: &'ret mut ZGen<'ast>,
     vars: Vec<HashMap<String, ast::Type<'ast>>>,
-    rewriter: ZConstLiteralRewriter,
+    rewriter: Option<ZConstLiteralRewriter>,
 }
 
 impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
@@ -1246,7 +1273,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         zgen: &'ret mut ZGen<'ast>,
     ) -> Self {
         let vars = vec![HashMap::new()];
-        let rewriter = ZConstLiteralRewriter::new(None);
+        let rewriter = Some(ZConstLiteralRewriter::new(None));
         Self {
             rets,
             gens,
@@ -1263,14 +1290,17 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
     ) -> ZVisitorResult {
         // XXX(TODO)
         // XXX rewriter using ast::Type instead?
-        self.rewriter.visit_expression(expr)
+        let mut rewriter = self.rewriter.take().unwrap();
+        let ret = rewriter.visit_expression(expr);
+        self.rewriter.replace(rewriter);
+        ret
     }
 
     fn walk_accesses(
         &mut self,
         mut ty: ast::Type<'ast>,
         accs: &[ast::AssigneeAccess<'ast>],
-    ) -> Result<ast::Type<'ast>, ZVisitorError> {
+    ) -> ZResult<ast::Type<'ast>> {
         use ast::{AssigneeAccess::*, BasicOrStructType, Type};
         let mut acc_dim_offset = 0;
         for acc in accs {
@@ -1279,112 +1309,90 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                     "ZStatementWalker: tried to walk accesses into a Basic type".to_string(),
                 ));
             }
-            if let Select(aacc) = acc {
-                if let Type::Array(aty) = ty {
-                    use ast::RangeOrExpression::*;
-                    ty = match &aacc.expression {
-                        Range(r) => {
-                            // XXX(question): range checks here?
-                            let from = Box::new(if let Some(f) = &r.from {
-                                f.0.clone()
-                            } else {
-                                let f_expr = ast::U32NumberExpression {
-                                    value: "0x0000".to_string(),
+            ty = match acc {
+                Select(aacc) => {
+                    if let Type::Array(aty) = ty {
+                        use ast::RangeOrExpression::*;
+                        match &aacc.expression {
+                            Range(r) => {
+                                // XXX(question): range checks here?
+                                let from = Box::new(if let Some(f) = &r.from {
+                                    f.0.clone()
+                                } else {
+                                    let f_expr = ast::U32NumberExpression {
+                                        value: "0x0000".to_string(),
+                                        span: r.span.clone(),
+                                    };
+                                    let f_hlit = ast::HexLiteralExpression {
+                                        value: ast::HexNumberExpression::U32(f_expr),
+                                        span: r.span.clone(),
+                                    };
+                                    let f_lexp = ast::LiteralExpression::HexLiteral(f_hlit);
+                                    ast::Expression::Literal(f_lexp)
+                                });
+                                let to = Box::new(if let Some(t) = &r.to {
+                                    t.0.clone()
+                                } else {
+                                    aty.dimensions[acc_dim_offset].clone()
+                                });
+                                let r_bexp = ast::BinaryExpression {
+                                    op: ast::BinaryOperator::Sub,
+                                    left: to,
+                                    right: from,
                                     span: r.span.clone(),
                                 };
-                                let f_hlit = ast::HexLiteralExpression {
-                                    value: ast::HexNumberExpression::U32(f_expr),
-                                    span: r.span.clone(),
-                                };
-                                let f_lexp = ast::LiteralExpression::HexLiteral(f_hlit);
-                                ast::Expression::Literal(f_lexp)
-                            });
-                            let to = Box::new(if let Some(t) = &r.to {
-                                t.0.clone()
-                            } else {
-                                aty.dimensions[acc_dim_offset].clone()
-                            });
-                            let r_bexp = ast::BinaryExpression {
-                                op: ast::BinaryOperator::Sub,
-                                left: to,
-                                right: from,
-                                span: r.span.clone(),
-                            };
-                            let mut aty = aty;
-                            aty.dimensions[acc_dim_offset] = ast::Expression::Binary(r_bexp);
-                            Type::Array(aty)
-                        }
-                        Expression(_) => {
-                            if aty.dimensions.len() - acc_dim_offset > 1 {
-                                acc_dim_offset += 1;
+                                let mut aty = aty;
+                                aty.dimensions[acc_dim_offset] = ast::Expression::Binary(r_bexp);
                                 Type::Array(aty)
-                            } else {
-                                acc_dim_offset = 0;
-                                match aty.ty {
-                                    BasicOrStructType::Basic(b) => Type::Basic(b),
-                                    BasicOrStructType::Struct(s) => Type::Struct(s),
+                            }
+                            Expression(_) => {
+                                if aty.dimensions.len() - acc_dim_offset > 1 {
+                                    acc_dim_offset += 1;
+                                    Type::Array(aty)
+                                } else {
+                                    acc_dim_offset = 0;
+                                    match aty.ty {
+                                        BasicOrStructType::Basic(b) => Type::Basic(b),
+                                        BasicOrStructType::Struct(s) => Type::Struct(s),
+                                    }
                                 }
                             }
                         }
-                    };
-                } else {
-                    return Err(ZVisitorError(
-                        "ZStatementWalker: tried to access an Array as a Struct".to_string(),
-                    ));
-                }
-            }
-            if let Member(macc) = acc {
-                /*
-                 * For generics, mangle names, save new structs, and change
-                 * types in the AST accordingly.
-                 *
-                 * Do this in a few steps:
-                 * - when encountering a DefinitionStatement (in the walker),
-                 *   any generic struct always gets mangled to a unique name
-                 *   (XXX figure out how to choose unique name) but not yet
-                 *   monomorpnized. Rewrite AST to use mangled name.
-                 *
-                 * - As we walk and unify, monomorphize by modifying the struct
-                 *   definition itself. (Are these stored in ZGen??? I think so...)
-                 *
-                 * - XXX do we need to require explicit generics on LHS of defs?
-                 *   Maybe not...
-                 */
-                ty = if let Type::Struct(sty) = ty {
-                    let sdef = self.zgen.get_struct(&sty.id.value).ok_or_else(|| {
-                        ZVisitorError(format!(
-                            "ZStatementWalker: undeclared struct type {}",
-                            &sty.id.value,
-                        ))
-                    })?;
-                    if sty.id.value.contains('*') {
-                        if sty.explicit_generics.is_none() {
-                            return Err(ZVisitorError(format!(
-                                "ZStatementWalker: supposedly monomorphized struct {} lacks generics",
-                                &sty.id.value,
-                            )));
-                        }
-                        if sty.explicit_generics.as_ref().unwrap().values.len()
-                            != sdef.generics.len()
-                        {
-                            return Err(ZVisitorError(format!(
-                                "ZStatementWalker: monomorphized struct {} has wrong #generics",
-                                &sty.id.value,
-                            )));
-                        }
-                        // XXX(TODO) handle generics?
                     } else {
-                        assert!(sdef.generics.is_empty());
+                        return Err(ZVisitorError(
+                            "ZStatementWalker: tried to access an Array as a Struct".to_string(),
+                        ));
                     }
+                }
+                Member(macc) => {
+                    // XXX(unimpl) LHS of definitions must make generics explicit
+                    if let Type::Struct(sty) = ty {
+                        let sdef = self.get_struct(&sty.id.value)
+                            .and_then(|sdef| {
+                                if !sdef.generics.is_empty() {
+                                    Err(ZVisitorError(format!("ZStatementWalker: encountered non-monomorphized struct type {}", &sty.id.value)))
+                                } else {
+                                    Ok(sdef)
+                                }
+                            })?;
 
-                    // XXX(TODO)
-
-                    Type::Struct(sty)
-                } else {
-                    return Err(ZVisitorError(
-                        "ZStatementWalker: tried to access a Struct as an Array".to_string(),
-                    ));
-                };
+                        // asdf
+                        sdef.fields
+                            .iter()
+                            .find(|f| &f.id.value == &macc.id.value)
+                            .ok_or_else(|| {
+                                ZVisitorError(format!(
+                                    "ZStatementWalker: struct {} has no member {}",
+                                    &sty.id.value, &macc.id.value,
+                                ))
+                            })
+                            .map(|f| f.ty.clone())?
+                    } else {
+                        return Err(ZVisitorError(
+                            "ZStatementWalker: tried to access a Struct as an Array".to_string(),
+                        ));
+                    }
+                }
             }
         }
 
@@ -1402,6 +1410,12 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         }
 
         Ok(ty)
+    }
+
+    fn get_struct(&self, id: &str) -> ZResult<&ast::StructDefinition<'ast>> {
+        self.zgen.get_struct(id).ok_or_else(|| {
+            ZVisitorError(format!("ZStatementWalker: undeclared struct type {}", id))
+        })
     }
 
     fn generic_defined(&self, id: &str) -> bool {
@@ -1431,7 +1445,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         }
     }
 
-    fn apply_varonly<F, R>(&mut self, nm: &str, f: F) -> Result<R, ZVisitorError>
+    fn apply_varonly<F, R>(&mut self, nm: &str, f: F) -> ZResult<R>
     where
         F: FnOnce(&mut Self, &str) -> R,
     {
@@ -1450,15 +1464,11 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         }
     }
 
-    fn lookup_type_varonly(&mut self, nm: &str) -> Result<Option<ast::Type<'ast>>, ZVisitorError> {
+    fn lookup_type_varonly(&mut self, nm: &str) -> ZResult<Option<ast::Type<'ast>>> {
         self.apply_varonly(nm, |s, nm| s.lookup_var(nm))
     }
 
-    fn insert_var(
-        &mut self,
-        nm: &str,
-        ty: ast::Type<'ast>,
-    ) -> Result<Option<ast::Type<'ast>>, ZVisitorError> {
+    fn insert_var(&mut self, nm: &str, ty: ast::Type<'ast>) -> ZResult<Option<ast::Type<'ast>>> {
         self.apply_varonly(nm, |s, nm| {
             s.vars.last_mut().unwrap().insert(nm.to_string(), ty)
         })
@@ -1470,6 +1480,87 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
 
     fn pop_scope(&mut self) {
         self.vars.pop();
+    }
+
+    fn monomorphize_struct(&mut self, sty: &mut ast::StructType<'ast>) -> ZResult<ast::Type<'ast>> {
+        use ast::ConstantGenericValue::*;
+        let mut rewriter = self.rewriter.take().unwrap();
+
+        // get the struct definition and return early if we don't have to handle generics
+        let sdef = self.get_struct(&sty.id.value)?;
+        if sdef.generics.is_empty() {
+            if sty.explicit_generics.is_some() {
+                return Err(ZVisitorError(format!(
+                    "ZStatementWalker: got explicit generics for non-generic struct type {}:\n{}",
+                    &sty.id.value,
+                    span_to_string(&sty.span),
+                )));
+            } else {
+                return Ok(ast::Type::Struct(sty.clone()));
+            }
+        }
+
+        // set up mapping from generic names to values
+        let mut gen_values = sty
+            .explicit_generics
+            .take()
+            .ok_or_else(|| {
+                ZVisitorError(format!(
+                    "ZStatementWalker: must declare explicit generics for type {} in LHS:\n{}",
+                    &sty.id.value,
+                    span_to_string(&sty.span),
+                ))
+            })
+            .and_then(|eg| {
+                if eg.values.len() != sdef.generics.len() {
+                    Err(ZVisitorError(format!(
+                        "ZStatementWalker: wrong number of explicit generics for struct {}:\n{}",
+                        &sty.id.value,
+                        span_to_string(&sty.span),
+                    )))
+                } else if eg.values.iter().any(|v| matches!(v, Underscore(_))) {
+                    Err(ZVisitorError(format!(
+                        "ZStatementWalker: must specify all generic arguments for LHS struct {}:\n{}",
+                        &sty.id.value,
+                        span_to_string(&sty.span),
+                    )))
+                } else {
+                    Ok(eg)
+                }
+            })?.values;
+        gen_values
+            .iter_mut()
+            .try_for_each(|cgv| rewriter.visit_constant_generic_value(cgv))?;
+        sty.id.value = format!("{}*{:?}", &sdef.id.value, &gen_values);
+
+        // rewrite struct definition if necessary
+        if !self.zgen.struct_defined(&sty.id.value) {
+            let mut sdef = sdef.clone();
+            // XXX(premature optimization) update sdef.id.value ?
+            //sdef.id.value = sty.id.value.clone();
+            let gvmap = sdef
+                .generics
+                .drain(..)
+                .map(|ie| ie.value)
+                .zip(gen_values.into_iter().map(|cgv| match cgv {
+                    Underscore(_) => unreachable!(),
+                    Value(l) => ast::Expression::Literal(l),
+                    Identifier(i) => ast::Expression::Identifier(i),
+                }))
+                .collect::<HashMap<String, ast::Expression<'ast>>>();
+
+            // rewrite struct definition
+            let mut sf_rewriter = ZStructRewriter { gvmap };
+            sdef.fields
+                .iter_mut()
+                .try_for_each(|f| sf_rewriter.visit_struct_field(f))?;
+
+            // save it
+            self.zgen.insert_struct(&sty.id.value, sdef);
+        }
+
+        self.rewriter.replace(rewriter);
+        Ok(ast::Type::Struct(sty.clone()))
     }
 }
 
@@ -1563,11 +1654,10 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
             let ty = self.walk_accesses(ty, accs)?;
             self.unify(Some(ty), &mut def.expression)?;
         } else {
-            debug!(
-                "Warning: found expression with no LHS (maybe)\n{:#?}",
-                def.span
-            );
-            self.unify(None, &mut def.expression)?;
+            return Err(ZVisitorError(format!(
+                "ZStatementWalker: found expression with no LHS:\n{}",
+                span_to_string(&def.span),
+            )));
         }
         self.visit_expression(&mut def.expression)?;
         self.visit_span(&mut def.span)
@@ -1580,7 +1670,6 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
         use ast::TypedIdentifierOrAssignee::*;
         match tioa {
             Assignee(a) => {
-                // XXX(rsw) do we want to / can we validate the access chain?
                 if !self.var_defined(&a.id.value) {
                     Err(ZVisitorError(format!(
                         "ZStatementWalker: assignment to undeclared variable {}",
@@ -1591,7 +1680,12 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
                 }
             }
             TypedIdentifier(ti) => {
-                self.insert_var(&ti.identifier.value, ti.ty.clone())?;
+                let ty = if let ast::Type::Struct(sty) = &mut ti.ty {
+                    self.monomorphize_struct(sty)?
+                } else {
+                    ti.ty.clone()
+                };
+                self.insert_var(&ti.identifier.value, ty)?;
                 self.visit_typed_identifier(ti)
             }
         }
@@ -1820,4 +1914,8 @@ impl<'ast> ZVisitorMut<'ast> for ZConstLiteralRewriter {
 
         self.visit_span(&mut pe.span)
     }
+}
+
+fn span_to_string(span: &ast::Span) -> String {
+    span.lines().intersperse("\n").collect::<String>()
 }

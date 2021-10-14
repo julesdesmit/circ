@@ -1082,11 +1082,32 @@ impl<'ast> ZGen<'ast> {
         self.structs.get(&s_path).and_then(|m| m.get(&s_name))
     }
 
+    fn struct_defined(&self, struct_id: &str) -> bool {
+        let (s_path, s_name) = self.deref_import(struct_id);
+        self.structs
+            .get(&s_path)
+            .map(|m| m.contains_key(&s_name))
+            .unwrap_or(false)
+    }
+
+    /*
     fn get_struct_mut(&mut self, struct_id: &str) -> Option<&mut ast::StructDefinition<'ast>> {
         let (s_path, s_name) = self.deref_import(struct_id);
         self.structs
             .get_mut(&s_path)
             .and_then(|m| m.get_mut(&s_name))
+    }
+    */
+
+    fn insert_struct(
+        &mut self,
+        id: &str,
+        def: ast::StructDefinition<'ast>,
+    ) -> Option<ast::StructDefinition<'ast>> {
+        self.structs
+            .get_mut(self.file_stack.last().unwrap())
+            .unwrap()
+            .insert(id.to_string(), def)
     }
 
     fn visit_structs(&mut self, files: Vec<PathBuf>) {
@@ -1104,10 +1125,7 @@ impl<'ast> ZGen<'ast> {
                         .visit_struct_definition(&mut s_ast)
                         .unwrap_or_else(|e| self.err(e.0, &s.span));
 
-                    self.structs
-                        .get_mut(self.file_stack.last().unwrap())
-                        .unwrap()
-                        .insert(s.id.value.clone(), s_ast);
+                    self.insert_struct(&s.id.value, s_ast);
                 }
             }
             self.file_stack.pop();
