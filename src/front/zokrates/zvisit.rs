@@ -1230,6 +1230,25 @@ pub fn walk_iteration_statement<'ast, Z: ZVisitorMut<'ast>>(
 
 // *************************
 
+struct ZExpressionTyper<'ast, 'ret, 'wlk> {
+    walker: &'wlk ZStatementWalker<'ast, 'ret>,
+    ty: Option<ast::Type<'ast>>,
+}
+
+impl<'ast, 'ret, 'wlk> ZExpressionTyper<'ast, 'ret, 'wlk> {
+    fn new(walker: &'wlk ZStatementWalker<'ast, 'ret>) -> Self {
+        Self { walker, ty: None }
+    }
+
+    fn take(&mut self) -> Option<ast::Type<'ast>> {
+        self.ty.take()
+    }
+}
+
+impl<'ast, 'ret, 'wlk> ZVisitorMut<'ast> for ZExpressionTyper<'ast, 'ret, 'wlk> {
+    // XXX(TODO)
+}
+
 struct ZExpressionRewriter<'ast> {
     gvmap: HashMap<String, ast::Expression<'ast>>,
 }
@@ -1263,7 +1282,6 @@ pub(super) struct ZStatementWalker<'ast, 'ret> {
     gens: &'ret [ast::IdentifierExpression<'ast>],
     zgen: &'ret mut ZGen<'ast>,
     vars: Vec<HashMap<String, ast::Type<'ast>>>,
-    rewriter: Option<ZConstLiteralRewriter>,
 }
 
 impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
@@ -1273,27 +1291,293 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         zgen: &'ret mut ZGen<'ast>,
     ) -> Self {
         let vars = vec![HashMap::new()];
-        let rewriter = Some(ZConstLiteralRewriter::new(None));
         Self {
             rets,
             gens,
             zgen,
             vars,
-            rewriter,
         }
     }
 
+    fn eq_basic_type(&self, lbt: &ast::BasicType<'ast>, rbt: &ast::BasicType<'ast>) -> bool {
+        use ast::BasicType::*;
+        match (lbt, rbt) {
+            (Field(_), Field(_)) => true,
+            (Boolean(_), Boolean(_)) => true,
+            (U8(_), U8(_)) => true,
+            (U16(_), U16(_)) => true,
+            (U32(_), U32(_)) => true,
+            (U64(_), U64(_)) => true,
+            _ => false,
+        }
+    }
+
+    // XXX(opt) take ref to Type instead of owned?
     fn unify(
         &mut self,
         ty: Option<ast::Type<'ast>>,
         expr: &mut ast::Expression<'ast>,
     ) -> ZVisitorResult {
-        // XXX(TODO)
-        // XXX rewriter using ast::Type instead?
-        let mut rewriter = self.rewriter.take().unwrap();
-        let ret = rewriter.visit_expression(expr);
-        self.rewriter.replace(rewriter);
-        ret
+        let mut rewriter = ZConstLiteralRewriter::new(None);
+        rewriter.visit_expression(expr)?;
+        let ty = if let Some(ty) = ty { ty } else { return Ok(()) };
+        self.unify_expression(ty, expr)
+    }
+
+    fn unify_expression(
+        &mut self,
+        ty: ast::Type<'ast>,
+        expr: &mut ast::Expression<'ast>,
+    ) -> ZVisitorResult {
+        use ast::Expression::*;
+        match expr {
+            Ternary(te) => self.unify_ternary(ty, te),
+            Binary(be) => self.unify_binary(ty, be),
+            Unary(ue) => self.unify_unary(ty, ue),
+            Literal(le) => self.unify_literal(ty, le),
+            // XXX(TODO)
+            _ => unimplemented!(),
+        }
+    }
+
+    fn unify_ternary(
+        &mut self,
+        ty: ast::Type<'ast>,
+        te: &mut ast::TernaryExpression<'ast>,
+    ) -> ZVisitorResult {
+        // first expr must have type Bool, others the expected output type
+        let bool_ty = ast::Type::Basic(ast::BasicType::Boolean(ast::BooleanType {
+            span: te.span.clone(),
+        }));
+        self.unify_expression(bool_ty, &mut te.first)?;
+        self.unify_expression(ty.clone(), &mut te.second)?;
+        self.unify_expression(ty, &mut te.third)
+    }
+
+    fn unify_binary(
+        &mut self,
+        ty: ast::Type<'ast>,
+        be: &mut ast::BinaryExpression<'ast>,
+    ) -> ZVisitorResult {
+        use ast::{BasicType::*, BinaryOperator::*, Type::*};
+        let bt = if let Basic(bt) = ty {
+            bt
+        } else {
+            return Err(ZVisitorError(format!(
+                "ZStatementWalker: binary operators require Basic operands:\n{}",
+                span_to_string(&be.span),
+            )));
+        };
+
+        let (lt, rt) = match &be.op {
+            BitXor | BitAnd | BitOr | Rem => match &bt {
+                U8(_) | U16(_) | U32(_) | U64(_) => Ok((Basic(bt.clone()), Basic(bt))),
+                _ => Err(ZVisitorError(
+                    "ZStatementWalker: Bit/Rem operators require U* operands".to_owned(),
+                )),
+            },
+            RightShift | LeftShift => match &bt {
+                U8(_) | U16(_) | U32(_) | U64(_) => Ok((
+                    Basic(bt),
+                    Basic(U32(ast::U32Type {
+                        span: be.span.clone(),
+                    })),
+                )),
+                _ => Err(ZVisitorError(
+                    "ZStatementWalker: << and >> operators require U* left operand".to_owned(),
+                )),
+            },
+            Or | And => match &bt {
+                Boolean(_) => Ok((Basic(bt.clone()), Basic(bt))),
+                _ => Err(ZVisitorError(
+                    "ZStatementWalker: Logical-And/Or operators require Bool operands".to_owned(),
+                )),
+            },
+            Add | Sub | Mul | Div => match &bt {
+                Boolean(_) => Err(ZVisitorError(
+                    "ZStatementWalker: +,-,*,/ operators require Field or U* operands".to_owned(),
+                )),
+                _ => Ok((Basic(bt.clone()), Basic(bt))),
+            },
+            Eq | NotEq | Lt | Gt | Lte | Gte => match &bt {
+                Boolean(_) => {
+                    let mut expr_walker = ZExpressionTyper::new(self);
+                    expr_walker.visit_expression(&mut be.left)?;
+                    let lty = expr_walker.take();
+                    expr_walker.visit_expression(&mut be.right)?;
+                    let rty = expr_walker.take();
+                    match (&lty, &rty) {
+                            (Some(Basic(_)), None) => Ok((lty.clone().unwrap(), lty.unwrap())),
+                            (None, Some(Basic(_))) => Ok((rty.clone().unwrap(), rty.unwrap())),
+                            (Some(Basic(lbt)), Some(Basic(rbt))) => {
+                                if self.eq_basic_type(lbt, rbt) {
+                                    Ok((lty.unwrap(), rty.unwrap()))
+                                } else {
+                                    Err(ZVisitorError(format!(
+                                        "ZStatementWalker: got differing types {:?}, {:?} for lhs, rhs of expr:\n{}",
+                                        lbt,
+                                        rbt,
+                                        span_to_string(&be.span),
+                                    )))
+                                }
+                            }
+                            (None, None) => Err(ZVisitorError(format!(
+                                "ZStatementWalker: could not infer type of binop:\n{}",
+                                span_to_string(&be.span),
+                            ))),
+                            _ => Err(ZVisitorError(format!(
+                                "ZStatementWalker: unknown error in binop typing:\n{}",
+                                span_to_string(&be.span),
+                            ))),
+                        }
+                        .and_then(|(lty, rty)| if matches!(&be.op, Lt | Gt | Lte | Gte) && matches!(lty, Basic(Boolean(_))) {
+                            Err(ZVisitorError(format!(
+                                "ZStatementWalker: >,>=,<,<= operators cannot be applied to Bool:\n{}",
+                                span_to_string(&be.span),
+                            )))
+                        } else {
+                            Ok((lty, rty))
+                        })
+                }
+                _ => Err(ZVisitorError(
+                    "ZStatementWalker: comparison and equality operators output Bool".to_owned(),
+                )),
+            },
+            Pow => match &bt {
+                // XXX does POW operator really require U32 RHS?
+                Field(_) => Ok((
+                    Basic(bt),
+                    Basic(U32(ast::U32Type {
+                        span: be.span.clone(),
+                    })),
+                )),
+                _ => Err(ZVisitorError(
+                    "ZStatementWalker: pow operator must take Field LHS and U32 RHS".to_owned(),
+                )),
+            },
+        }?;
+        self.unify_expression(lt, &mut be.left)?;
+        self.unify_expression(rt, &mut be.right)
+    }
+
+    fn unify_unary(
+        &mut self,
+        ty: ast::Type<'ast>,
+        ue: &mut ast::UnaryExpression<'ast>,
+    ) -> ZVisitorResult {
+        use ast::{BasicType::*, Type::*, UnaryOperator::*};
+        let bt = if let Basic(bt) = ty {
+            bt
+        } else {
+            return Err(ZVisitorError(format!(
+                "ZStatementWalker: unary operators require Basic operands:\n{}",
+                span_to_string(&ue.span),
+            )));
+        };
+
+        let ety = match &ue.op {
+            Pos(_) | Neg(_) => match &bt {
+                Boolean(_) => Err(ZVisitorError(
+                    "ZStatementWalker: +,- unary operators require Field or U* operands"
+                        .to_string(),
+                )),
+                _ => Ok(Basic(bt)),
+            },
+            Not(_) => match &bt {
+                Boolean(_) => Ok(Basic(bt)),
+                _ => Err(ZVisitorError(
+                    "ZStatementWalker: ! unary operator requires Bool operand".to_string(),
+                )),
+            },
+        }?;
+
+        self.unify_expression(ety, &mut ue.expression)
+    }
+
+    fn unify_literal(
+        &mut self,
+        ty: ast::Type<'ast>,
+        le: &mut ast::LiteralExpression<'ast>,
+    ) -> ZVisitorResult {
+        use ast::{BasicType::*, LiteralExpression::*, Type::*};
+        let bt = if let Basic(bt) = ty {
+            bt
+        } else {
+            return Err(ZVisitorError(format!(
+                "ZStatementWalker: literal expressions must yield basic types:\n{}",
+                span_to_string(le.span()),
+            )));
+        };
+
+        match le {
+            BooleanLiteral(_) => {
+                if let Boolean(_) = &bt {
+                    Ok(())
+                } else {
+                    Err(ZVisitorError(format!(
+                        "ZStatementWalker: expected {:?}, found BooleanLiteral:\n{}",
+                        &bt,
+                        span_to_string(le.span()),
+                    )))
+                }
+            }
+            HexLiteral(hle) => {
+                use ast::HexNumberExpression as HNE;
+                match &hle.value {
+                    HNE::U8(_) if matches!(&bt, U8(_)) => Ok(()),
+                    HNE::U16(_) if matches!(&bt, U16(_)) => Ok(()),
+                    HNE::U32(_) if matches!(&bt, U32(_)) => Ok(()),
+                    HNE::U64(_) if matches!(&bt, U64(_)) => Ok(()),
+                    _ => Err(ZVisitorError(format!(
+                        "ZStatementWalker: HexLiteral seemed to want type {:?}:\n{}",
+                        &bt,
+                        span_to_string(&hle.span),
+                    ))),
+                }
+            }
+            DecimalLiteral(dle) => {
+                use ast::DecimalSuffix as DS;
+                match &dle.suffix {
+                    Some(ds) => match (ds, &bt) {
+                        (DS::Field(_), Field(_)) => Ok(()),
+                        (DS::U8(_), U8(_)) => Ok(()),
+                        (DS::U16(_), U16(_)) => Ok(()),
+                        (DS::U32(_), U32(_)) => Ok(()),
+                        (DS::U64(_), U64(_)) => Ok(()),
+                        _ => Err(ZVisitorError(format!(
+                            "ZStatementWalker: DecimalLiteral wanted {:?} found {:?}:\n{}",
+                            &bt,
+                            ds,
+                            span_to_string(&dle.span),
+                        ))),
+                    },
+                    None => match &bt {
+                        Boolean(_) => Err(ZVisitorError(format!(
+                            "ZStatementWalker: DecimalLiteral wanted Bool:\n{}",
+                            span_to_string(&dle.span),
+                        ))),
+                        Field(_) => Ok(DS::Field(ast::FieldSuffix {
+                            span: dle.span.clone(),
+                        })),
+                        U8(_) => Ok(DS::U8(ast::U8Suffix {
+                            span: dle.span.clone(),
+                        })),
+                        U16(_) => Ok(DS::U16(ast::U16Suffix {
+                            span: dle.span.clone(),
+                        })),
+                        U32(_) => Ok(DS::U32(ast::U32Suffix {
+                            span: dle.span.clone(),
+                        })),
+                        U64(_) => Ok(DS::U64(ast::U64Suffix {
+                            span: dle.span.clone(),
+                        })),
+                    }
+                    .map(|ds| {
+                        dle.suffix.replace(ds);
+                    }),
+                }
+            }
+        }
     }
 
     fn walk_accesses(
@@ -1488,7 +1772,6 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
 
     fn monomorphize_struct(&mut self, sty: &mut ast::StructType<'ast>) -> ZResult<ast::Type<'ast>> {
         use ast::ConstantGenericValue::*;
-        let mut rewriter = self.rewriter.take().unwrap();
 
         // get the struct definition and return early if we don't have to handle generics
         let sdef = self.get_struct(&sty.id.value)?;
@@ -1548,6 +1831,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                     ).map(|_| eg)
                 }
             })?.values;
+        let mut rewriter = ZConstLiteralRewriter::new(None);
         gen_values
             .iter_mut()
             .try_for_each(|cgv| rewriter.visit_constant_generic_value(cgv))?;
@@ -1579,7 +1863,6 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             self.zgen.insert_struct(&sty.id.value, sdef);
         }
 
-        self.rewriter.replace(rewriter);
         Ok(ast::Type::Struct(sty.clone()))
     }
 }
@@ -1661,7 +1944,7 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
             .map(|tioa| {
                 use ast::TypedIdentifierOrAssignee::*;
                 let (na, acc) = match tioa {
-                    Assignee(a) => (&a.id.value, &a.accesses[..]),
+                    Assignee(a) => (&a.id.value, a.accesses.as_ref()),
                     TypedIdentifier(ti) => {
                         (&ti.identifier.value, &[] as &[ast::AssigneeAccess<'ast>])
                     }
