@@ -740,6 +740,14 @@ impl<'ast> ZGen<'ast> {
             .map(|(_, v)| v)
     }
 
+    fn const_defined(&self, i: &str) -> bool {
+        let (f_file, f_name) = self.deref_import(i);
+        self.constants
+            .get(&f_file)
+            .map(|m| m.contains_key(&f_name))
+            .unwrap_or(false)
+    }
+
     fn const_identifier_(&self, i: &ast::IdentifierExpression<'ast>) -> T {
         if let Some(val) = self.const_lookup_(i.value.as_ref()) {
             val.clone()
@@ -853,7 +861,7 @@ impl<'ast> ZGen<'ast> {
         if self
             .import_map
             .get(self.cur_path())
-            .and_then(|m| Some(m.contains_key(&c.id.value)))
+            .map(|m| m.contains_key(&c.id.value))
             .unwrap_or(false)
         {
             self.err(

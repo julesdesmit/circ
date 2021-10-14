@@ -1230,11 +1230,11 @@ pub fn walk_iteration_statement<'ast, Z: ZVisitorMut<'ast>>(
 
 // *************************
 
-struct ZStructRewriter<'ast> {
+struct ZExpressionRewriter<'ast> {
     gvmap: HashMap<String, ast::Expression<'ast>>,
 }
 
-impl<'ast> ZVisitorMut<'ast> for ZStructRewriter<'ast> {
+impl<'ast> ZVisitorMut<'ast> for ZExpressionRewriter<'ast> {
     fn visit_expression(&mut self, expr: &mut ast::Expression<'ast>) -> ZVisitorResult {
         use ast::Expression::*;
         match expr {
@@ -1418,6 +1418,10 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         })
     }
 
+    fn const_defined(&self, id: &str) -> bool {
+        self.zgen.const_defined(id)
+    }
+
     fn generic_defined(&self, id: &str) -> bool {
         // XXX(perf) if self.gens is long this could be improved with a HashSet.
         // Realistically, a function will have a small number of generic params.
@@ -1438,7 +1442,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             Some(ast::Type::Basic(ast::BasicType::U32(ast::U32Type {
                 span: id.span.clone(),
             })))
-        } else if let Some(t) = self.zgen.const_ty_lookup_(id.value.as_ref()) {
+        } else if let Some(t) = self.zgen.const_ty_lookup_(&id.value) {
             Some(t.clone())
         } else {
             self.lookup_var(&id.value)
@@ -1454,7 +1458,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                 "ZStatementWalker: attempted to shadow generic {}",
                 nm,
             )))
-        } else if self.zgen.const_lookup_(nm.as_ref()).is_some() {
+        } else if self.zgen.const_lookup_(nm).is_some() {
             Err(ZVisitorError(format!(
                 "ZStatementWalker: attempted to shadow const {}",
                 nm,
@@ -1525,7 +1529,23 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                         span_to_string(&sty.span),
                     )))
                 } else {
-                    Ok(eg)
+                    // make sure identifiers are actually defined!
+                    eg.values.iter().try_for_each(|v|
+                        if let Identifier(ie) = v {
+                            if self.const_defined(&ie.value) || self.generic_defined(&ie.value) {
+                                Ok(())
+                            } else {
+                                Err(ZVisitorError(format!(
+                                    "ZStatementWalker: {} undef or non-const in {} generics:\n{}",
+                                    &ie.value,
+                                    &sty.id.value,
+                                    span_to_string(&sty.span),
+                                )))
+                            }
+                        } else {
+                            Ok(())
+                        }
+                    ).map(|_| eg)
                 }
             })?.values;
         gen_values
@@ -1550,7 +1570,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                 .collect::<HashMap<String, ast::Expression<'ast>>>();
 
             // rewrite struct definition
-            let mut sf_rewriter = ZStructRewriter { gvmap };
+            let mut sf_rewriter = ZExpressionRewriter { gvmap };
             sdef.fields
                 .iter_mut()
                 .try_for_each(|f| sf_rewriter.visit_struct_field(f))?;
