@@ -1329,7 +1329,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
 
     // XXX(opt) take ref to Type instead of owned?
     fn unify(
-        &mut self,
+        &self,
         ty: Option<ast::Type<'ast>>,
         expr: &mut ast::Expression<'ast>,
     ) -> ZVisitorResult {
@@ -1340,7 +1340,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
     }
 
     fn unify_expression(
-        &mut self,
+        &self,
         ty: ast::Type<'ast>,
         expr: &mut ast::Expression<'ast>,
     ) -> ZVisitorResult {
@@ -1350,7 +1350,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             Ternary(te) => self.unify_ternary(ty, te),
             Binary(be) => self.unify_binary(ty, be),
             Unary(ue) => self.unify_unary(ty, ue),
-            Postfix(pe) => unimplemented!(),
+            Postfix(pe) => self.unify_postfix(ty, pe),
             Identifier(ie) => self.unify_identifier(ty, ie),
             Literal(le) => self.unify_literal(ty, le),
             InlineArray(ia) => self.unify_inline_array(ty, ia),
@@ -1359,8 +1359,67 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         }
     }
 
+    fn unify_fdef_call(
+        &self,
+        fdef: &ast::FunctionDefinition<'ast>,
+        call: &mut ast::CallAccess<'ast>,
+    ) -> ZResult<ast::Type<'ast>> {
+        unimplemented!()
+    }
+
+    fn unify_postfix(
+        &self,
+        ty: ast::Type<'ast>,
+        pf: &mut ast::PostfixExpression<'ast>,
+    ) -> ZVisitorResult {
+        use ast::Access::*;
+        assert!(!pf.accesses.is_empty());
+
+        // XXX(assume) no functions in arrays or structs
+        // handle first access, which is special because only this one could be a Call()
+        let mut accesses = std::mem::take(&mut pf.accesses);
+        let (pf_id_ty, acc_offset) = if let Call(ca) = accesses.first_mut().unwrap() {
+            // look up function type
+            self.get_function(&pf.id.value).and_then(|fdef| {
+                if fdef.returns.is_empty() {
+                    // XXX(unimpl) fn without return type not supported
+                    std::mem::drop(fdef);
+                    Err(ZVisitorError(format!(
+                        "ZStatementWalker: fn {} has no return type",
+                        &pf.id.value,
+                    )))
+                } else if fdef.returns.len() > 1 {
+                    // XXX(unimpl) multiple return types not implemented
+                    std::mem::drop(fdef);
+                    Err(ZVisitorError(format!(
+                        "ZStatementWalker: fn {} has multiple returns",
+                        &pf.id.value,
+                    )))
+                } else {
+                    Ok((self.unify_fdef_call(fdef, ca)?, 1))
+                }
+            })?
+        } else {
+            // just look up variable type
+            (
+                self.lookup_type(&pf.id).ok_or_else(|| {
+                    ZVisitorError(format!(
+                        "ZStatementWalker: identifier {} undefined",
+                        &pf.id.value
+                    ))
+                })?,
+                0,
+            )
+        };
+        pf.accesses = accesses;
+
+        // typecheck the remaining accesses
+        let mut acc_ty = self.walk_accesses(pf_id_ty, &pf.accesses[acc_offset..], acc_to_msacc)?;
+        ZTypeEquality::new(self, &ty).visit_type(&mut acc_ty)
+    }
+
     fn unify_array_initializer(
-        &mut self,
+        &self,
         ty: ast::Type<'ast>,
         ai: &mut ast::ArrayInitializerExpression<'ast>,
     ) -> ZVisitorResult {
@@ -1374,7 +1433,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                 span_to_string(&ai.span),
             )));
         };
-        assert!(at.dimensions.len() > 0);
+        assert!(!at.dimensions.is_empty());
 
         // XXX(unimpl) does not check array lengths, just unifies ai.count with U32!
         let u32_ty = Basic(ast::BasicType::U32(ast::U32Type {
@@ -1392,7 +1451,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
     }
 
     fn unify_inline_struct(
-        &mut self,
+        &self,
         ty: ast::Type<'ast>,
         is: &mut ast::InlineStructExpression<'ast>,
     ) -> ZVisitorResult {
@@ -1456,7 +1515,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
     }
 
     fn unify_inline_array(
-        &mut self,
+        &self,
         ty: ast::Type<'ast>,
         ia: &mut ast::InlineArrayExpression<'ast>,
     ) -> ZVisitorResult {
@@ -1479,7 +1538,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
     }
 
     fn unify_identifier(
-        &mut self,
+        &self,
         ty: ast::Type<'ast>,
         ie: &mut ast::IdentifierExpression<'ast>,
     ) -> ZVisitorResult {
@@ -1494,7 +1553,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
     }
 
     fn unify_ternary(
-        &mut self,
+        &self,
         ty: ast::Type<'ast>,
         te: &mut ast::TernaryExpression<'ast>,
     ) -> ZVisitorResult {
@@ -1508,7 +1567,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
     }
 
     fn unify_binary(
-        &mut self,
+        &self,
         ty: ast::Type<'ast>,
         be: &mut ast::BinaryExpression<'ast>,
     ) -> ZVisitorResult {
@@ -1616,7 +1675,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
     }
 
     fn unify_unary(
-        &mut self,
+        &self,
         ty: ast::Type<'ast>,
         ue: &mut ast::UnaryExpression<'ast>,
     ) -> ZVisitorResult {
@@ -1650,7 +1709,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
     }
 
     fn unify_literal(
-        &mut self,
+        &self,
         ty: ast::Type<'ast>,
         le: &mut ast::LiteralExpression<'ast>,
     ) -> ZVisitorResult {
@@ -1735,12 +1794,18 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         }
     }
 
-    fn walk_accesses(
-        &mut self,
+    // XXX(q) do we need to unify access expressions?
+    fn walk_accesses<F, T>(
+        &self,
         mut ty: ast::Type<'ast>,
-        accs: &[ast::AssigneeAccess<'ast>],
-    ) -> ZResult<ast::Type<'ast>> {
-        use ast::{AssigneeAccess::*, Type};
+        accs: &[T],
+        f: F,
+    ) -> ZResult<ast::Type<'ast>>
+    where
+        F: Fn(&T) -> ZResult<MSAccRef<'_, 'ast>>,
+    {
+        use ast::Type;
+        use MSAccRef::*;
         let mut acc_dim_offset = 0;
         for acc in accs {
             if matches!(ty, Type::Basic(_)) {
@@ -1748,7 +1813,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                     "ZStatementWalker: tried to walk accesses into a Basic type".to_string(),
                 ));
             }
-            ty = match acc {
+            ty = match f(acc)? {
                 Select(aacc) => {
                     if let Type::Array(aty) = ty {
                         use ast::RangeOrExpression::*;
@@ -1848,6 +1913,12 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         Ok(ty)
     }
 
+    fn get_function(&self, id: &str) -> ZResult<&ast::FunctionDefinition<'ast>> {
+        self.zgen
+            .get_function(id)
+            .ok_or_else(|| ZVisitorError(format!("ZStatementWalker: undeclared function {}", id)))
+    }
+
     fn get_struct(&self, id: &str) -> ZResult<&ast::StructDefinition<'ast>> {
         self.zgen.get_struct(id).ok_or_else(|| {
             ZVisitorError(format!("ZStatementWalker: undeclared struct type {}", id))
@@ -1922,6 +1993,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         self.vars.pop();
     }
 
+    // XXX(q) instead monomorphize by making sure that ExplicitGenerics are attached to Type???
     fn monomorphize_struct(&mut self, sty: &mut ast::StructType<'ast>) -> ZResult<ast::Type<'ast>> {
         use ast::ConstantGenericValue::*;
 
@@ -2112,7 +2184,7 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
             .transpose()?
             .flatten();
         if let Some((ty, accs)) = ty_accs {
-            let ty = self.walk_accesses(ty, accs)?;
+            let ty = self.walk_accesses(ty, accs, aacc_to_msacc)?;
             self.unify(Some(ty), &mut def.expression)?;
         } else {
             return Err(ZVisitorError(format!(
@@ -2387,5 +2459,30 @@ fn bos_to_type<'ast>(bos: ast::BasicOrStructType<'ast>) -> ast::Type<'ast> {
     match bos {
         Struct(st) => Type::Struct(st),
         Basic(bt) => Type::Basic(bt),
+    }
+}
+
+enum MSAccRef<'a, 'ast> {
+    Select(&'a ast::ArrayAccess<'ast>),
+    Member(&'a ast::MemberAccess<'ast>),
+}
+
+fn aacc_to_msacc<'a, 'ast>(i: &'a ast::AssigneeAccess<'ast>) -> ZResult<MSAccRef<'a, 'ast>> {
+    use ast::AssigneeAccess::*;
+    Ok(match i {
+        Select(t) => MSAccRef::Select(t),
+        Member(t) => MSAccRef::Member(t),
+    })
+}
+
+fn acc_to_msacc<'a, 'ast>(i: &'a ast::Access<'ast>) -> ZResult<MSAccRef<'a, 'ast>> {
+    use ast::Access::*;
+    match i {
+        Select(t) => Ok(MSAccRef::Select(t)),
+        Member(t) => Ok(MSAccRef::Member(t)),
+        Call(t) => Err(ZVisitorError(format!(
+            "Illegal fn call:\n{}",
+            span_to_string(&t.span),
+        ))),
     }
 }

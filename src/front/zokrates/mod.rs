@@ -1090,6 +1090,11 @@ impl<'ast> ZGen<'ast> {
         self.structs.get(&s_path).and_then(|m| m.get(&s_name))
     }
 
+    fn get_function(&self, fn_id: &str) -> Option<&ast::FunctionDefinition<'ast>> {
+        let (f_path, f_name) = self.deref_import(fn_id);
+        self.functions.get(&f_path).and_then(|m| m.get(&f_name))
+    }
+
     fn struct_defined(&self, struct_id: &str) -> bool {
         let (s_path, s_name) = self.deref_import(struct_id);
         self.structs
