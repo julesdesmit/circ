@@ -1354,9 +1354,41 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             Identifier(ie) => self.unify_identifier(ty, ie),
             Literal(le) => self.unify_literal(ty, le),
             InlineArray(ia) => self.unify_inline_array(ty, ia),
-            InlineStruct(is) => unimplemented!(),
-            ArrayInitializer(ai) => unimplemented!(),
+            InlineStruct(is) => self.unify_inline_struct(ty, is),
+            ArrayInitializer(ai) => self.unify_array_initializer(ty, ai),
         }
+    }
+
+    fn unify_array_initializer(
+        &mut self,
+        ty: ast::Type<'ast>,
+        ai: &mut ast::ArrayInitializerExpression<'ast>,
+    ) -> ZVisitorResult {
+        use ast::Type::*;
+        let mut at = if let Array(at) = ty {
+            at
+        } else {
+            return Err(ZVisitorError(format!(
+                "ZStatementWalker: array initializer expression wanted type {:?}:\n{}",
+                &ty,
+                span_to_string(&ai.span),
+            )));
+        };
+        assert!(at.dimensions.len() > 0);
+
+        // XXX(unimpl) does not check array lengths, just unifies ai.count with U32!
+        let u32_ty = Basic(ast::BasicType::U32(ast::U32Type {
+            span: ai.span.clone(),
+        }));
+        self.unify_expression(u32_ty, &mut *ai.count)?;
+
+        let arr_ty = if at.dimensions.len() > 1 {
+            at.dimensions.remove(0); // perf?
+            Array(at)
+        } else {
+            bos_to_type(at.ty)
+        };
+        self.unify_expression(arr_ty, &mut *ai.value)
     }
 
     fn unify_inline_struct(
@@ -2121,6 +2153,7 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
     }
 }
 
+// XXX(TODO) use ast::Type rather than Ty here
 pub(super) struct ZConstLiteralRewriter {
     to_ty: Option<Ty>,
     found: bool,
@@ -2260,8 +2293,8 @@ impl<'ast> ZVisitorMut<'ast> for ZConstLiteralRewriter {
             }
         }
 
-        // always rewrite ArrayInitializerExpression::count literals to type Field
-        let to_ty = self.replace(Some(Ty::Field));
+        // always rewrite ArrayInitializerExpression::count literals to type U32
+        let to_ty = self.replace(Some(Ty::Uint(32)));
         self.visit_expression(&mut aie.count)?;
         self.to_ty = to_ty;
 
@@ -2269,8 +2302,8 @@ impl<'ast> ZVisitorMut<'ast> for ZConstLiteralRewriter {
     }
 
     fn visit_array_access(&mut self, acc: &mut ast::ArrayAccess<'ast>) -> ZVisitorResult {
-        // always rewrite ArrayAccess literals to type Field
-        let to_ty = self.replace(Some(Ty::Field));
+        // always rewrite ArrayAccess literals to type U32
+        let to_ty = self.replace(Some(Ty::Uint(32)));
         walk_array_access(self, acc)?;
         self.to_ty = to_ty;
         Ok(())
