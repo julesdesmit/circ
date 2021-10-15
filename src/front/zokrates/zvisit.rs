@@ -1230,6 +1230,34 @@ pub fn walk_iteration_statement<'ast, Z: ZVisitorMut<'ast>>(
 
 // *************************
 
+struct ZTypeEquality<'ast, 'ret, 'wlk, 'lty> {
+    walker: &'wlk ZStatementWalker<'ast, 'ret>,
+    ty: &'lty ast::Type<'ast>,
+}
+
+impl<'ast, 'ret, 'wlk, 'lty> ZTypeEquality<'ast, 'ret, 'wlk, 'lty> {
+    fn new(walker: &'wlk ZStatementWalker<'ast, 'ret>, ty: &'lty ast::Type<'ast>) -> Self {
+        Self { walker, ty }
+    }
+}
+
+impl<'ast, 'ret, 'wlk, 'lty> ZVisitorMut<'ast> for ZTypeEquality<'ast, 'ret, 'wlk, 'lty> {
+    /*
+    fn is_eq_basic_type(&self, lbt: &ast::BasicType<'ast>, rbt: &ast::BasicType<'ast>) -> bool {
+        use ast::BasicType::*;
+        match (lbt, rbt) {
+            (Field(_), Field(_)) => true,
+            (Boolean(_), Boolean(_)) => true,
+            (U8(_), U8(_)) => true,
+            (U16(_), U16(_)) => true,
+            (U32(_), U32(_)) => true,
+            (U64(_), U64(_)) => true,
+            _ => false,
+        }
+    }
+    */
+}
+
 struct ZExpressionTyper<'ast, 'ret, 'wlk> {
     walker: &'wlk ZStatementWalker<'ast, 'ret>,
     ty: Option<ast::Type<'ast>>,
@@ -1299,19 +1327,6 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         }
     }
 
-    fn eq_basic_type(&self, lbt: &ast::BasicType<'ast>, rbt: &ast::BasicType<'ast>) -> bool {
-        use ast::BasicType::*;
-        match (lbt, rbt) {
-            (Field(_), Field(_)) => true,
-            (Boolean(_), Boolean(_)) => true,
-            (U8(_), U8(_)) => true,
-            (U16(_), U16(_)) => true,
-            (U32(_), U32(_)) => true,
-            (U64(_), U64(_)) => true,
-            _ => false,
-        }
-    }
-
     // XXX(opt) take ref to Type instead of owned?
     fn unify(
         &mut self,
@@ -1330,14 +1345,108 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         expr: &mut ast::Expression<'ast>,
     ) -> ZVisitorResult {
         use ast::Expression::*;
+        // XXX(TODO)
         match expr {
             Ternary(te) => self.unify_ternary(ty, te),
             Binary(be) => self.unify_binary(ty, be),
             Unary(ue) => self.unify_unary(ty, ue),
+            Postfix(pe) => unimplemented!(),
+            Identifier(ie) => self.unify_identifier(ty, ie),
             Literal(le) => self.unify_literal(ty, le),
-            // XXX(TODO)
-            _ => unimplemented!(),
+            InlineArray(ia) => self.unify_inline_array(ty, ia),
+            InlineStruct(is) => unimplemented!(),
+            ArrayInitializer(ai) => unimplemented!(),
         }
+    }
+
+    fn unify_inline_struct(
+        &mut self,
+        ty: ast::Type<'ast>,
+        is: &mut ast::InlineStructExpression<'ast>,
+    ) -> ZVisitorResult {
+        use ast::Type::*;
+        let st = if let Struct(st) = ty {
+            st
+        } else {
+            return Err(ZVisitorError(format!(
+                "ZStatementWalker: inline struct wanted type {:?}:\n{}",
+                &ty,
+                span_to_string(&is.span),
+            )));
+        };
+
+        let sm_types = self
+            .get_struct(&st.id.value)
+            .and_then(|sdef| {
+                if sdef.id.value.starts_with(&is.ty.value) {
+                    // rewrite to monomorphized version
+                    if &is.ty.value != &sdef.id.value {
+                        is.ty.value = sdef.id.value.clone();
+                    }
+                    Ok(sdef)
+                } else {
+                    Err(ZVisitorError(format!(
+                    "ZStatementWalker: inline struct wanted struct type {} but declared {}:\n{}",
+                    &st.id.value,
+                    &is.ty.value,
+                    span_to_string(&is.span),
+                )))
+                }
+            })?
+            .fields
+            .iter()
+            .map(|sf| (sf.id.value.clone(), sf.ty.clone()))
+            .collect::<HashMap<String, ast::Type<'ast>>>();
+
+        is.members.iter_mut().try_for_each(|ism| {
+            sm_types
+                .get(ism.id.value.as_str())
+                .ok_or_else(|| {
+                    ZVisitorError(format!(
+                        "ZStatementWalker: struct {} has no member {}",
+                        &st.id.value, &ism.id.value,
+                    ))
+                })
+                .and_then(|sm_ty| self.unify_expression(sm_ty.clone(), &mut ism.expression))
+        })
+    }
+
+    fn unify_inline_array(
+        &mut self,
+        ty: ast::Type<'ast>,
+        ia: &mut ast::InlineArrayExpression<'ast>,
+    ) -> ZVisitorResult {
+        use ast::{SpreadOrExpression::*, Type::*};
+        let at = if let Array(at) = ty {
+            at
+        } else {
+            return Err(ZVisitorError(format!(
+                "ZStatementWalker: inline array wanted type {:?}:\n{}",
+                &ty,
+                span_to_string(&ia.span),
+            )));
+        };
+
+        // XXX(unimpl) does not check array lengths, just unifies types!
+        ia.expressions.iter_mut().try_for_each(|soe| match soe {
+            Spread(s) => self.unify_expression(Array(at.clone()), &mut s.expression),
+            Expression(e) => self.unify_expression(bos_to_type(at.ty.clone()), e),
+        })
+    }
+
+    fn unify_identifier(
+        &mut self,
+        ty: ast::Type<'ast>,
+        ie: &mut ast::IdentifierExpression<'ast>,
+    ) -> ZVisitorResult {
+        self.lookup_type(ie)
+            .ok_or_else(|| {
+                ZVisitorError(format!(
+                    "ZStatementWalker: identifier {} undefined",
+                    &ie.value,
+                ))
+            })
+            .and_then(|mut ity| ZTypeEquality::new(self, &ty).visit_type(&mut ity))
     }
 
     fn unify_ternary(
@@ -1409,17 +1518,19 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                     match (&lty, &rty) {
                             (Some(Basic(_)), None) => Ok((lty.clone().unwrap(), lty.unwrap())),
                             (None, Some(Basic(_))) => Ok((rty.clone().unwrap(), rty.unwrap())),
-                            (Some(Basic(lbt)), Some(Basic(rbt))) => {
-                                if self.eq_basic_type(lbt, rbt) {
-                                    Ok((lty.unwrap(), rty.unwrap()))
-                                } else {
-                                    Err(ZVisitorError(format!(
-                                        "ZStatementWalker: got differing types {:?}, {:?} for lhs, rhs of expr:\n{}",
-                                        lbt,
-                                        rbt,
+                            (Some(Basic(_)), Some(Basic(_))) => {
+                                let lty = lty.unwrap();
+                                let mut rty = rty.unwrap();
+                                ZTypeEquality::new(self, &lty).visit_type(&mut rty)
+                                    .map_err(|e|
+                                    ZVisitorError(format!(
+                                        "ZStatementWalker: got differing types {:?}, {:?} for lhs, rhs of expr:\n{}\n{}",
+                                        &lty,
+                                        &rty,
+                                        e.0,
                                         span_to_string(&be.span),
                                     )))
-                                }
+                                    .map(|_| (lty, rty))
                             }
                             (None, None) => Err(ZVisitorError(format!(
                                 "ZStatementWalker: could not infer type of binop:\n{}",
@@ -1585,7 +1696,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         mut ty: ast::Type<'ast>,
         accs: &[ast::AssigneeAccess<'ast>],
     ) -> ZResult<ast::Type<'ast>> {
-        use ast::{AssigneeAccess::*, BasicOrStructType, Type};
+        use ast::{AssigneeAccess::*, Type};
         let mut acc_dim_offset = 0;
         for acc in accs {
             if matches!(ty, Type::Basic(_)) {
@@ -1635,10 +1746,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                                     Type::Array(aty)
                                 } else {
                                     acc_dim_offset = 0;
-                                    match aty.ty {
-                                        BasicOrStructType::Basic(b) => Type::Basic(b),
-                                        BasicOrStructType::Struct(s) => Type::Struct(s),
-                                    }
+                                    bos_to_type(aty.ty)
                                 }
                             }
                         }
@@ -1839,12 +1947,18 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
 
         // rewrite struct definition if necessary
         if !self.zgen.struct_defined(&sty.id.value) {
-            let mut sdef = sdef.clone();
-            // XXX(premature optimization) update sdef.id.value ?
-            //sdef.id.value = sty.id.value.clone();
-            let gvmap = sdef
-                .generics
-                .drain(..)
+            let generics = sdef.generics.clone();
+            let mut sdef = ast::StructDefinition {
+                id: ast::IdentifierExpression {
+                    value: sty.id.value.clone(),
+                    span: sdef.id.span.clone(),
+                },
+                generics: Vec::new(),
+                fields: sdef.fields.clone(),
+                span: sdef.span.clone(),
+            };
+            let gvmap = generics
+                .into_iter()
                 .map(|ie| ie.value)
                 .zip(gen_values.into_iter().map(|cgv| match cgv {
                     Underscore(_) => unreachable!(),
@@ -2221,4 +2335,12 @@ impl<'ast> ZVisitorMut<'ast> for ZConstLiteralRewriter {
 
 fn span_to_string(span: &ast::Span) -> String {
     span.lines().intersperse("\n").collect::<String>()
+}
+
+fn bos_to_type<'ast>(bos: ast::BasicOrStructType<'ast>) -> ast::Type<'ast> {
+    use ast::{BasicOrStructType::*, Type};
+    match bos {
+        Struct(st) => Type::Struct(st),
+        Basic(bt) => Type::Basic(bt),
+    }
 }
