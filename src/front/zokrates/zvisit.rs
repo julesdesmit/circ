@@ -1375,40 +1375,52 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             )));
         };
 
-        let sm_types = self
-            .get_struct(&st.id.value)
-            .and_then(|sdef| {
-                if sdef.id.value.starts_with(&is.ty.value) {
-                    // rewrite to monomorphized version
-                    if &is.ty.value != &sdef.id.value {
-                        is.ty.value = sdef.id.value.clone();
-                    }
-                    Ok(sdef)
+        let (mut sm_types, st_name) = self.get_struct(&st.id.value).and_then(|sdef| {
+            if sdef.id.value.starts_with(&is.ty.value) {
+                let st_name = if &is.ty.value != &sdef.id.value {
+                    // rewrite AST to monomorphized version
+                    std::mem::replace(&mut is.ty.value, sdef.id.value.clone())
                 } else {
-                    Err(ZVisitorError(format!(
+                    sdef.id.value.clone()
+                };
+                let sm_types = sdef
+                    .fields
+                    .iter()
+                    .map(|sf| (sf.id.value.clone(), sf.ty.clone()))
+                    .collect::<HashMap<String, ast::Type<'ast>>>();
+                Ok((sm_types, st_name))
+            } else {
+                Err(ZVisitorError(format!(
                     "ZStatementWalker: inline struct wanted struct type {} but declared {}:\n{}",
                     &st.id.value,
                     &is.ty.value,
                     span_to_string(&is.span),
                 )))
-                }
-            })?
-            .fields
-            .iter()
-            .map(|sf| (sf.id.value.clone(), sf.ty.clone()))
-            .collect::<HashMap<String, ast::Type<'ast>>>();
+            }
+        })?;
 
         is.members.iter_mut().try_for_each(|ism| {
             sm_types
-                .get(ism.id.value.as_str())
+                .remove(ism.id.value.as_str())
                 .ok_or_else(|| {
                     ZVisitorError(format!(
-                        "ZStatementWalker: struct {} has no member {}",
-                        &st.id.value, &ism.id.value,
+                        "ZStatementWalker: struct {} has no member {}, or duplicate member in expression",
+                        &st_name, &ism.id.value,
                     ))
                 })
-                .and_then(|sm_ty| self.unify_expression(sm_ty.clone(), &mut ism.expression))
-        })
+                .and_then(|sm_ty| self.unify_expression(sm_ty, &mut ism.expression))
+        })?;
+
+        // make sure InlineStructExpression declared all members
+        if !sm_types.is_empty() {
+            Err(ZVisitorError(format!(
+                "ZStatementWalker: struct {} inline decl missing members {:?}\n",
+                &st_name,
+                sm_types.keys().collect::<Vec<_>>()
+            )))
+        } else {
+            Ok(())
+        }
     }
 
     fn unify_inline_array(
