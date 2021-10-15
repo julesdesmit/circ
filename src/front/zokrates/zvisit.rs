@@ -1272,10 +1272,233 @@ impl<'ast, 'ret, 'wlk> ZExpressionTyper<'ast, 'ret, 'wlk> {
     fn take(&mut self) -> Option<ast::Type<'ast>> {
         self.ty.take()
     }
+
+    fn visit_identifier_expression_t(
+        &mut self,
+        ie: &mut ast::IdentifierExpression<'ast>,
+    ) -> ZVisitorResult {
+        assert!(self.ty.is_none());
+        self.walker.lookup_type(ie).map(|t| {
+            self.ty.replace(t);
+        })
+    }
 }
 
 impl<'ast, 'ret, 'wlk> ZVisitorMut<'ast> for ZExpressionTyper<'ast, 'ret, 'wlk> {
-    // XXX(TODO)
+    fn visit_expression(&mut self, expr: &mut ast::Expression<'ast>) -> ZVisitorResult {
+        use ast::Expression::*;
+        if self.ty.is_some() {
+            return Err(ZVisitorError("type found at expression entry?".to_string()));
+        }
+        match expr {
+            Ternary(te) => self.visit_ternary_expression(te),
+            Binary(be) => self.visit_binary_expression(be),
+            Unary(ue) => self.visit_unary_expression(ue),
+            Postfix(pe) => self.visit_postfix_expression(pe),
+            Identifier(ie) => self.visit_identifier_expression_t(ie),
+            Literal(le) => self.visit_literal_expression(le),
+            InlineArray(iae) => self.visit_inline_array_expression(iae),
+            InlineStruct(ise) => self.visit_inline_struct_expression(ise),
+            ArrayInitializer(aie) => self.visit_array_initializer_expression(aie),
+        }
+    }
+
+    fn visit_ternary_expression(
+        &mut self,
+        te: &mut ast::TernaryExpression<'ast>,
+    ) -> ZVisitorResult {
+        assert!(self.ty.is_none());
+        self.visit_expression(&mut te.second)?;
+        let ty2 = self.take();
+        self.visit_expression(&mut te.third)?;
+        let ty3 = self.take();
+        match (ty2, ty3) {
+            (Some(t), None) => self.ty.replace(t),
+            (None, Some(t)) => self.ty.replace(t),
+            (Some(t1), Some(mut t2)) => {
+                ZTypeEquality::new(self.walker, &t1).visit_type(&mut t2)?;
+                self.ty.replace(t2)
+            }
+            (None, None) => None,
+        };
+        Ok(())
+    }
+
+    fn visit_binary_expression(&mut self, be: &mut ast::BinaryExpression<'ast>) -> ZVisitorResult {
+        use ast::{BasicType::*, BinaryOperator::*, Type::*};
+        assert!(self.ty.is_none());
+        match &be.op {
+            Or | And | Eq | NotEq | Lt | Gt | Lte | Gte => {
+                self.ty.replace(Basic(Boolean(ast::BooleanType {
+                    span: be.span.clone(),
+                })));
+            }
+            Pow => {
+                self.ty.replace(Basic(Field(ast::FieldType {
+                    span: be.span.clone(),
+                })));
+            }
+            BitXor | BitAnd | BitOr | RightShift | LeftShift | Add | Sub | Mul | Div | Rem => {
+                self.visit_expression(&mut be.left)?;
+                let tyL = self.take();
+                self.visit_expression(&mut be.right)?;
+                let tyR = self.take();
+                if let Some(ty) = match (tyL, tyR) {
+                    (Some(t), None) => Some(t),
+                    (None, Some(t)) => Some(t),
+                    (Some(t1), Some(mut t2)) => {
+                        ZTypeEquality::new(self.walker, &t1).visit_type(&mut t2)?;
+                        Some(t2)
+                    }
+                    (None, None) => None,
+                } {
+                    if !matches!(&ty, Basic(_)) {
+                        return Err(ZVisitorError("got non-Basic type for a binop".to_string()));
+                    }
+                    if matches!(&ty, Basic(Boolean(_))) {
+                        return Err(ZVisitorError(
+                            "got Bool for a binop that cannot support it".to_string(),
+                        ));
+                    }
+                    if matches!(
+                        &be.op,
+                        BitXor | BitAnd | BitOr | RightShift | LeftShift | Rem
+                    ) && matches!(&ty, Basic(Field(_)))
+                    {
+                        return Err(ZVisitorError(
+                            "got Field for a binop that cannot support it".to_string(),
+                        ));
+                    }
+                    self.ty.replace(ty);
+                }
+            }
+        };
+        Ok(())
+    }
+
+    fn visit_unary_expression(&mut self, ue: &mut ast::UnaryExpression<'ast>) -> ZVisitorResult {
+        use ast::{BasicType::*, Type::*, UnaryOperator::*};
+        assert!(self.ty.is_none());
+        match &ue.op {
+            Pos(_) | Neg(_) => {
+                self.visit_expression(&mut ue.expression)?;
+                if let Some(ty) = &self.ty {
+                    if !matches!(ty, Basic(_)) || matches!(ty, Basic(Boolean(_))) {
+                        return Err(ZVisitorError(
+                            "got Bool or non-Basic for unary op".to_string(),
+                        ));
+                    }
+                }
+            }
+            Not(_) => {
+                self.ty.replace(Basic(Boolean(ast::BooleanType {
+                    span: ue.span.clone(),
+                })));
+            }
+        }
+        Ok(())
+    }
+
+    fn visit_boolean_literal_expression(
+        &mut self,
+        ble: &mut ast::BooleanLiteralExpression<'ast>,
+    ) -> ZVisitorResult {
+        assert!(self.ty.is_none());
+        self.ty.replace(ast::Type::Basic(ast::BasicType::Boolean(
+            ast::BooleanType {
+                span: ble.span.clone(),
+            },
+        )));
+        Ok(())
+    }
+
+    fn visit_decimal_suffix(&mut self, ds: &mut ast::DecimalSuffix<'ast>) -> ZVisitorResult {
+        assert!(self.ty.is_none());
+        use ast::{BasicType::*, DecimalSuffix as DS, Type::*};
+        match ds {
+            DS::U8(s) => self.ty.replace(Basic(U8(ast::U8Type {
+                span: s.span.clone(),
+            }))),
+            DS::U16(s) => self.ty.replace(Basic(U16(ast::U16Type {
+                span: s.span.clone(),
+            }))),
+            DS::U32(s) => self.ty.replace(Basic(U32(ast::U32Type {
+                span: s.span.clone(),
+            }))),
+            DS::U64(s) => self.ty.replace(Basic(U64(ast::U64Type {
+                span: s.span.clone(),
+            }))),
+            DS::Field(s) => self.ty.replace(Basic(Field(ast::FieldType {
+                span: s.span.clone(),
+            }))),
+        };
+        Ok(())
+    }
+
+    fn visit_hex_number_expression(
+        &mut self,
+        hne: &mut ast::HexNumberExpression<'ast>,
+    ) -> ZVisitorResult {
+        assert!(self.ty.is_none());
+        use ast::{BasicType::*, HexNumberExpression as HNE, Type::*};
+        match hne {
+            HNE::U8(s) => self.ty.replace(Basic(U8(ast::U8Type {
+                span: s.span.clone(),
+            }))),
+            HNE::U16(s) => self.ty.replace(Basic(U16(ast::U16Type {
+                span: s.span.clone(),
+            }))),
+            HNE::U32(s) => self.ty.replace(Basic(U32(ast::U32Type {
+                span: s.span.clone(),
+            }))),
+            HNE::U64(s) => self.ty.replace(Basic(U64(ast::U64Type {
+                span: s.span.clone(),
+            }))),
+        };
+        Ok(())
+    }
+
+    fn visit_array_initializer_expression(
+        &mut self,
+        aie: &mut ast::ArrayInitializerExpression<'ast>,
+    ) -> ZVisitorResult {
+        assert!(self.ty.is_none());
+        use ast::Type::*;
+
+        self.visit_expression(&mut *aie.value)?;
+        if let Some(ty) = self.take() {
+            let ty = match ty {
+                Array(mut aty) => {
+                    aty.dimensions.insert(0, aie.count.as_ref().clone());
+                    aty
+                }
+                Basic(bty) => ast::ArrayType {
+                    ty: ast::BasicOrStructType::Basic(bty),
+                    dimensions: vec![aie.count.as_ref().clone()],
+                    span: aie.span.clone(),
+                },
+                Struct(sty) => ast::ArrayType {
+                    ty: ast::BasicOrStructType::Struct(sty),
+                    dimensions: vec![aie.count.as_ref().clone()],
+                    span: aie.span.clone(),
+                },
+            };
+            self.ty.replace(Array(ty));
+        }
+        Ok(())
+    }
+
+    fn visit_inline_struct_expression(
+        &mut self,
+        ise: &mut ast::InlineStructExpression<'ast>,
+    ) -> ZVisitorResult {
+        // XXX(unimpl) we don't monomorphize struct type here... OK?
+        self.visit_identifier_expression_t(&mut ise.ty)
+    }
+
+    // TODO:
+    //   postfix
+    //   inlinearray
 }
 
 struct ZExpressionRewriter<'ast> {
@@ -1381,7 +1604,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             )));
         }
 
-        // XXX(unimpl) generic inference in fn calls not supported yet
+        // XXX(unimpl) generic inference in fn calls not yet supported
         use ast::ConstantGenericValue::*;
         if (call.explicit_generics.is_some()
             && call
@@ -1460,15 +1683,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             })?
         } else {
             // just look up variable type
-            (
-                self.lookup_type(&pf.id).ok_or_else(|| {
-                    ZVisitorError(format!(
-                        "ZStatementWalker: identifier {} undefined",
-                        &pf.id.value
-                    ))
-                })?,
-                0,
-            )
+            (self.lookup_type(&pf.id)?, 0)
         };
         pf.accesses = accesses;
 
@@ -1602,12 +1817,6 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         ie: &mut ast::IdentifierExpression<'ast>,
     ) -> ZVisitorResult {
         self.lookup_type(ie)
-            .ok_or_else(|| {
-                ZVisitorError(format!(
-                    "ZStatementWalker: identifier {} undefined",
-                    &ie.value,
-                ))
-            })
             .and_then(|mut ity| ZTypeEquality::new(self, &ty).visit_type(&mut ity))
     }
 
@@ -2003,16 +2212,21 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         self.vars.iter().rev().find_map(|v| v.get(nm).cloned())
     }
 
-    fn lookup_type(&self, id: &ast::IdentifierExpression<'ast>) -> Option<ast::Type<'ast>> {
+    fn lookup_type(&self, id: &ast::IdentifierExpression<'ast>) -> ZResult<ast::Type<'ast>> {
         if self.generic_defined(&id.value) {
             // generics are always U32
-            Some(ast::Type::Basic(ast::BasicType::U32(ast::U32Type {
+            Ok(ast::Type::Basic(ast::BasicType::U32(ast::U32Type {
                 span: id.span.clone(),
             })))
         } else if let Some(t) = self.zgen.const_ty_lookup_(&id.value) {
-            Some(t.clone())
+            Ok(t.clone())
         } else {
-            self.lookup_var(&id.value)
+            self.lookup_var(&id.value).ok_or_else(|| {
+                ZVisitorError(format!(
+                    "ZStatementWalker: identifier {} undefined",
+                    &id.value
+                ))
+            })
         }
     }
 
