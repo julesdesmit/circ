@@ -1243,6 +1243,7 @@ impl<'ast, 'ret, 'wlk, 'lty> ZTypeEquality<'ast, 'ret, 'wlk, 'lty> {
 
 impl<'ast, 'ret, 'wlk, 'lty> ZVisitorMut<'ast> for ZTypeEquality<'ast, 'ret, 'wlk, 'lty> {
     /*
+     * XXX(TODO)
     fn is_eq_basic_type(&self, lbt: &ast::BasicType<'ast>, rbt: &ast::BasicType<'ast>) -> bool {
         use ast::BasicType::*;
         match (lbt, rbt) {
@@ -1345,7 +1346,6 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         expr: &mut ast::Expression<'ast>,
     ) -> ZVisitorResult {
         use ast::Expression::*;
-        // XXX(TODO)
         match expr {
             Ternary(te) => self.unify_ternary(ty, te),
             Binary(be) => self.unify_binary(ty, be),
@@ -1364,7 +1364,68 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         fdef: &ast::FunctionDefinition<'ast>,
         call: &mut ast::CallAccess<'ast>,
     ) -> ZResult<ast::Type<'ast>> {
-        unimplemented!()
+        if call.arguments.expressions.len() != fdef.parameters.len() {
+            return Err(ZVisitorError(format!(
+                "ZStatementWalker: wrong number of arguments to fn {}:\n{}",
+                &fdef.id.value,
+                span_to_string(&call.span),
+            )));
+        }
+        if call.explicit_generics.is_some()
+            && call.explicit_generics.as_ref().unwrap().values.len() != fdef.generics.len()
+        {
+            return Err(ZVisitorError(format!(
+                "ZStatementWalker: wrong number of generic args to fn {}:\n{}",
+                &fdef.id.value,
+                span_to_string(&call.span),
+            )));
+        }
+
+        // XXX(unimpl) generic inference in fn calls not supported yet
+        use ast::ConstantGenericValue::*;
+        if (call.explicit_generics.is_some()
+            && call
+                .explicit_generics
+                .as_ref()
+                .unwrap()
+                .values
+                .iter()
+                .any(|eg| matches!(eg, Underscore(_))))
+            || (call.explicit_generics.is_none() && !fdef.generics.is_empty())
+        {
+            return Err(ZVisitorError(format!(
+                "ZStatementWalker: generic inference in fn calls still wip:\n{}",
+                span_to_string(&call.span),
+            )));
+        }
+
+        // rewrite return type and return it
+        // XXX(perf) do this without so much cloning?
+        let egv = call
+            .explicit_generics
+            .as_ref()
+            .map(|eg| {
+                {
+                    eg.values.clone().into_iter().map(|cgv| match cgv {
+                        Underscore(_) => unreachable!(),
+                        Value(l) => ast::Expression::Literal(l),
+                        Identifier(i) => ast::Expression::Identifier(i),
+                    })
+                }
+                .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let gvmap = fdef
+            .generics
+            .clone()
+            .into_iter()
+            .map(|ie| ie.value)
+            .zip(egv.into_iter())
+            .collect::<HashMap<String, ast::Expression<'ast>>>();
+
+        let mut ret_rewriter = ZExpressionRewriter { gvmap };
+        let mut ret_ty = fdef.returns.first().unwrap().clone();
+        ret_rewriter.visit_type(&mut ret_ty).map(|_| ret_ty)
     }
 
     fn unify_postfix(
@@ -1383,14 +1444,12 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             self.get_function(&pf.id.value).and_then(|fdef| {
                 if fdef.returns.is_empty() {
                     // XXX(unimpl) fn without return type not supported
-                    std::mem::drop(fdef);
                     Err(ZVisitorError(format!(
                         "ZStatementWalker: fn {} has no return type",
                         &pf.id.value,
                     )))
                 } else if fdef.returns.len() > 1 {
                     // XXX(unimpl) multiple return types not implemented
-                    std::mem::drop(fdef);
                     Err(ZVisitorError(format!(
                         "ZStatementWalker: fn {} has multiple returns",
                         &pf.id.value,
@@ -1794,7 +1853,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         }
     }
 
-    // XXX(q) do we need to unify access expressions?
+    // XXX(q) unify access expressions?
     fn walk_accesses<F, T>(
         &self,
         mut ty: ast::Type<'ast>,
@@ -1819,7 +1878,8 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                         use ast::RangeOrExpression::*;
                         match &aacc.expression {
                             Range(r) => {
-                                // XXX(question): range checks here?
+                                // XXX(q): range checks here?
+                                // XXX(q): can we simplify exprs here to binops on generics?
                                 let from = Box::new(if let Some(f) = &r.from {
                                     f.0.clone()
                                 } else {
