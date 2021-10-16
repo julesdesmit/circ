@@ -1282,6 +1282,31 @@ impl<'ast, 'ret, 'wlk> ZExpressionTyper<'ast, 'ret, 'wlk> {
             self.ty.replace(t);
         })
     }
+
+    fn arrayize(
+        &self,
+        ty: ast::Type<'ast>,
+        cnt: ast::Expression<'ast>,
+        spn: &ast::Span<'ast>,
+    ) -> ast::ArrayType<'ast> {
+        use ast::Type::*;
+        match ty {
+            Array(mut aty) => {
+                aty.dimensions.insert(0, cnt);
+                aty
+            }
+            Basic(bty) => ast::ArrayType {
+                ty: ast::BasicOrStructType::Basic(bty),
+                dimensions: vec![cnt],
+                span: spn.clone(),
+            },
+            Struct(sty) => ast::ArrayType {
+                ty: ast::BasicOrStructType::Struct(sty),
+                dimensions: vec![cnt],
+                span: spn.clone(),
+            },
+        }
+    }
 }
 
 impl<'ast, 'ret, 'wlk> ZVisitorMut<'ast> for ZExpressionTyper<'ast, 'ret, 'wlk> {
@@ -1340,10 +1365,10 @@ impl<'ast, 'ret, 'wlk> ZVisitorMut<'ast> for ZExpressionTyper<'ast, 'ret, 'wlk> 
             }
             BitXor | BitAnd | BitOr | RightShift | LeftShift | Add | Sub | Mul | Div | Rem => {
                 self.visit_expression(&mut be.left)?;
-                let tyL = self.take();
+                let ty_l = self.take();
                 self.visit_expression(&mut be.right)?;
-                let tyR = self.take();
-                if let Some(ty) = match (tyL, tyR) {
+                let ty_r = self.take();
+                if let Some(ty) = match (ty_l, ty_r) {
                     (Some(t), None) => Some(t),
                     (None, Some(t)) => Some(t),
                     (Some(t1), Some(mut t2)) => {
@@ -1467,22 +1492,7 @@ impl<'ast, 'ret, 'wlk> ZVisitorMut<'ast> for ZExpressionTyper<'ast, 'ret, 'wlk> 
 
         self.visit_expression(&mut *aie.value)?;
         if let Some(ty) = self.take() {
-            let ty = match ty {
-                Array(mut aty) => {
-                    aty.dimensions.insert(0, aie.count.as_ref().clone());
-                    aty
-                }
-                Basic(bty) => ast::ArrayType {
-                    ty: ast::BasicOrStructType::Basic(bty),
-                    dimensions: vec![aie.count.as_ref().clone()],
-                    span: aie.span.clone(),
-                },
-                Struct(sty) => ast::ArrayType {
-                    ty: ast::BasicOrStructType::Struct(sty),
-                    dimensions: vec![aie.count.as_ref().clone()],
-                    span: aie.span.clone(),
-                },
-            };
+            let ty = self.arrayize(ty, aie.count.as_ref().clone(), &aie.span);
             self.ty.replace(Array(ty));
         }
         Ok(())
@@ -1496,9 +1506,52 @@ impl<'ast, 'ret, 'wlk> ZVisitorMut<'ast> for ZExpressionTyper<'ast, 'ret, 'wlk> 
         self.visit_identifier_expression_t(&mut ise.ty)
     }
 
+    fn visit_inline_array_expression(
+        &mut self,
+        iae: &mut ast::InlineArrayExpression<'ast>,
+    ) -> ZVisitorResult {
+        assert!(self.ty.is_none());
+        assert!(!iae.expressions.is_empty());
+
+        // XXX(unimpl) does not check array lengths
+        let iae_span = iae.span.clone();
+        let mut acc_ty = None;
+        iae.expressions.iter_mut().try_for_each(|soe| {
+            self.visit_spread_or_expression(soe)?;
+            if let Some(ty) = self.take() {
+                let mut ty = if matches!(soe, ast::SpreadOrExpression::Expression(_)) {
+                    ast::Type::Array(self.arrayize(
+                        ty,
+                        ast::Expression::Literal(ast::LiteralExpression::HexLiteral(
+                            ast::HexLiteralExpression {
+                                value: ast::HexNumberExpression::U32(ast::U32NumberExpression {
+                                    value: "0x0000".to_string(),
+                                    span: iae_span.clone(),
+                                }),
+                                span: iae_span.clone(),
+                            },
+                        )),
+                        &iae_span,
+                    ))
+                } else {
+                    ty
+                };
+
+                if let Some(acc) = &acc_ty {
+                    ZTypeEquality::new(self.walker, acc).visit_type(&mut ty)?;
+                } else {
+                    acc_ty.replace(ty);
+                }
+            }
+            Ok(())
+        })?;
+
+        self.ty = acc_ty;
+        Ok(())
+    }
+
     // TODO:
     //   postfix
-    //   inlinearray
 }
 
 struct ZExpressionRewriter<'ast> {
