@@ -1242,21 +1242,72 @@ impl<'ast, 'ret, 'wlk, 'lty> ZTypeEquality<'ast, 'ret, 'wlk, 'lty> {
 }
 
 impl<'ast, 'ret, 'wlk, 'lty> ZVisitorMut<'ast> for ZTypeEquality<'ast, 'ret, 'wlk, 'lty> {
-    /*
-     * XXX(TODO)
-    fn is_eq_basic_type(&self, lbt: &ast::BasicType<'ast>, rbt: &ast::BasicType<'ast>) -> bool {
-        use ast::BasicType::*;
-        match (lbt, rbt) {
-            (Field(_), Field(_)) => true,
-            (Boolean(_), Boolean(_)) => true,
-            (U8(_), U8(_)) => true,
-            (U16(_), U16(_)) => true,
-            (U32(_), U32(_)) => true,
-            (U64(_), U64(_)) => true,
-            _ => false,
+    fn visit_type(&mut self, ty: &mut ast::Type<'ast>) -> ZVisitorResult {
+        use ast::Type::*;
+        match ty {
+            Basic(bty) => {
+                if let Basic(bty2) = &self.ty {
+                    use ast::BasicType::*;
+                    match (&*bty, bty2) {
+                        (Field(_), Field(_)) => Ok(()),
+                        (Boolean(_), Boolean(_)) => Ok(()),
+                        (U8(_), U8(_)) => Ok(()),
+                        (U16(_), U16(_)) => Ok(()),
+                        (U32(_), U32(_)) => Ok(()),
+                        (U64(_), U64(_)) => Ok(()),
+                        _ => Err(ZVisitorError(format!(
+                            "basic type mismatch: expected {:?}, found {:?}",
+                            bty2, bty,
+                        ))),
+                    }
+                } else {
+                    Err(ZVisitorError(format!(
+                        "type mismatch: expected {:?}, found {:?}",
+                        &self.ty, ty,
+                    )))
+                }
+            }
+            Array(aty) => {
+                if let Array(aty2) = &self.ty {
+                    // XXX(unimpl) does not check array lengths
+                    if aty.dimensions.len() != aty2.dimensions.len() {
+                        Err(ZVisitorError(format!(
+                            "array type mismatch: expected {}-dimensional array, found {}-dimensional array",
+                            aty2.dimensions.len(),
+                            aty.dimensions.len(),
+                        )))
+                    } else {
+                        // XXX(perf) avoid clone?
+                        let target = bos_to_type(aty2.ty.clone());
+                        let mut source = bos_to_type(aty.ty.clone());
+                        ZTypeEquality::new(self.walker, &target).visit_type(&mut source)
+                    }
+                } else {
+                    Err(ZVisitorError(format!(
+                        "type mismatch: expected {:?}, found {:?}",
+                        &self.ty, ty,
+                    )))
+                }
+            }
+            Struct(sty) => {
+                if let Struct(sty2) = &self.ty {
+                    if &sty.id.value != &sty2.id.value {
+                        Err(ZVisitorError(format!(
+                            "struct type mismatch: expected {:?}, found {:?}",
+                            &sty2.id.value, &sty.id.value,
+                        )))
+                    } else {
+                        Ok(())
+                    }
+                } else {
+                    Err(ZVisitorError(format!(
+                        "type mismatch: expected {:?}, found {:?}",
+                        &self.ty, ty,
+                    )))
+                }
+            }
         }
     }
-    */
 }
 
 struct ZExpressionTyper<'ast, 'ret, 'wlk> {
@@ -2511,9 +2562,7 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
                 use ast::TypedIdentifierOrAssignee::*;
                 let (na, acc) = match tioa {
                     Assignee(a) => (&a.id.value, a.accesses.as_ref()),
-                    TypedIdentifier(ti) => {
-                        (&ti.identifier.value, &[] as &[ast::AssigneeAccess<'ast>])
-                    }
+                    TypedIdentifier(ti) => (&ti.identifier.value, &[][..]),
                 };
                 self.lookup_type_varonly(na).map(|t| t.map(|t| (t, acc)))
             })
