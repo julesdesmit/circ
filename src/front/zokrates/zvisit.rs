@@ -1514,9 +1514,9 @@ impl<'ast, 'ret, 'wlk> ZVisitorMut<'ast> for ZExpressionTyper<'ast, 'ret, 'wlk> 
         assert!(!iae.expressions.is_empty());
 
         // XXX(unimpl) does not check array lengths
-        let iae_span = iae.span.clone();
+        let (sp, ex) = (&iae.span, &mut iae.expressions);
         let mut acc_ty = None;
-        iae.expressions.iter_mut().try_for_each(|soe| {
+        ex.iter_mut().try_for_each(|soe| {
             self.visit_spread_or_expression(soe)?;
             if let Some(ty) = self.take() {
                 let mut ty = if matches!(soe, ast::SpreadOrExpression::Expression(_)) {
@@ -1526,12 +1526,12 @@ impl<'ast, 'ret, 'wlk> ZVisitorMut<'ast> for ZExpressionTyper<'ast, 'ret, 'wlk> 
                             ast::HexLiteralExpression {
                                 value: ast::HexNumberExpression::U32(ast::U32NumberExpression {
                                     value: "0x0000".to_string(),
-                                    span: iae_span.clone(),
+                                    span: sp.clone(),
                                 }),
-                                span: iae_span.clone(),
+                                span: sp.clone(),
                             },
                         )),
-                        &iae_span,
+                        sp,
                     ))
                 } else {
                     ty
@@ -1550,8 +1550,14 @@ impl<'ast, 'ret, 'wlk> ZVisitorMut<'ast> for ZExpressionTyper<'ast, 'ret, 'wlk> 
         Ok(())
     }
 
-    // TODO:
-    //   postfix
+    fn visit_postfix_expression(
+        &mut self,
+        pfe: &mut ast::PostfixExpression<'ast>,
+    ) -> ZVisitorResult {
+        assert!(self.ty.is_none());
+        self.ty.replace(self.walker.get_postfix_ty(pfe)?);
+        Ok(())
+    }
 }
 
 struct ZExpressionRewriter<'ast> {
@@ -1704,31 +1710,27 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         ret_rewriter.visit_type(&mut ret_ty).map(|_| ret_ty)
     }
 
-    fn unify_postfix(
-        &self,
-        ty: ast::Type<'ast>,
-        pf: &mut ast::PostfixExpression<'ast>,
-    ) -> ZVisitorResult {
+    fn get_postfix_ty(&self, pf: &mut ast::PostfixExpression<'ast>) -> ZResult<ast::Type<'ast>> {
         use ast::Access::*;
         assert!(!pf.accesses.is_empty());
 
         // XXX(assume) no functions in arrays or structs
         // handle first access, which is special because only this one could be a Call()
-        let mut accesses = std::mem::take(&mut pf.accesses);
-        let (pf_id_ty, acc_offset) = if let Call(ca) = accesses.first_mut().unwrap() {
+        let (id, acc) = (&pf.id, &mut pf.accesses);
+        let (pf_id_ty, acc_offset) = if let Call(ca) = acc.first_mut().unwrap() {
             // look up function type
-            self.get_function(&pf.id.value).and_then(|fdef| {
+            self.get_function(&id.value).and_then(|fdef| {
                 if fdef.returns.is_empty() {
                     // XXX(unimpl) fn without return type not supported
                     Err(ZVisitorError(format!(
                         "ZStatementWalker: fn {} has no return type",
-                        &pf.id.value,
+                        &id.value,
                     )))
                 } else if fdef.returns.len() > 1 {
                     // XXX(unimpl) multiple return types not implemented
                     Err(ZVisitorError(format!(
                         "ZStatementWalker: fn {} has multiple returns",
-                        &pf.id.value,
+                        &id.value,
                     )))
                 } else {
                     Ok((self.unify_fdef_call(fdef, ca)?, 1))
@@ -1736,12 +1738,19 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             })?
         } else {
             // just look up variable type
-            (self.lookup_type(&pf.id)?, 0)
+            (self.lookup_type(id)?, 0)
         };
-        pf.accesses = accesses;
 
         // typecheck the remaining accesses
-        let mut acc_ty = self.walk_accesses(pf_id_ty, &pf.accesses[acc_offset..], acc_to_msacc)?;
+        self.walk_accesses(pf_id_ty, &pf.accesses[acc_offset..], acc_to_msacc)
+    }
+
+    fn unify_postfix(
+        &self,
+        ty: ast::Type<'ast>,
+        pf: &mut ast::PostfixExpression<'ast>,
+    ) -> ZVisitorResult {
+        let mut acc_ty = self.get_postfix_ty(pf)?;
         ZTypeEquality::new(self, &ty).visit_type(&mut acc_ty)
     }
 
