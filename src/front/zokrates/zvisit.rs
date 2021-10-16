@@ -1230,83 +1230,63 @@ pub fn walk_iteration_statement<'ast, Z: ZVisitorMut<'ast>>(
 
 // *************************
 
-struct ZTypeEquality<'ast, 'ret, 'wlk, 'lty> {
-    walker: &'wlk ZStatementWalker<'ast, 'ret>,
-    ty: &'lty ast::Type<'ast>,
-}
-
-impl<'ast, 'ret, 'wlk, 'lty> ZTypeEquality<'ast, 'ret, 'wlk, 'lty> {
-    fn new(walker: &'wlk ZStatementWalker<'ast, 'ret>, ty: &'lty ast::Type<'ast>) -> Self {
-        Self { walker, ty }
+fn eq_type<'ast>(ty: &ast::Type<'ast>, ty2: &ast::Type<'ast>) -> ZVisitorResult {
+    use ast::Type::*;
+    match (ty, ty2) {
+        (Basic(bty), Basic(bty2)) => eq_basic_type(bty, bty2),
+        (Array(aty), Array(aty2)) => eq_array_type(aty, aty2),
+        (Struct(sty), Struct(sty2)) => eq_struct_type(sty, sty2),
+        _ => Err(ZVisitorError(format!(
+            "type mismatch: expected {:?}, found {:?}",
+            ty, ty2,
+        ))),
     }
 }
 
-impl<'ast, 'ret, 'wlk, 'lty> ZVisitorMut<'ast> for ZTypeEquality<'ast, 'ret, 'wlk, 'lty> {
-    fn visit_type(&mut self, ty: &mut ast::Type<'ast>) -> ZVisitorResult {
-        use ast::Type::*;
-        match ty {
-            Basic(bty) => {
-                if let Basic(bty2) = &self.ty {
-                    use ast::BasicType::*;
-                    match (&*bty, bty2) {
-                        (Field(_), Field(_)) => Ok(()),
-                        (Boolean(_), Boolean(_)) => Ok(()),
-                        (U8(_), U8(_)) => Ok(()),
-                        (U16(_), U16(_)) => Ok(()),
-                        (U32(_), U32(_)) => Ok(()),
-                        (U64(_), U64(_)) => Ok(()),
-                        _ => Err(ZVisitorError(format!(
-                            "basic type mismatch: expected {:?}, found {:?}",
-                            bty2, bty,
-                        ))),
-                    }
-                } else {
-                    Err(ZVisitorError(format!(
-                        "type mismatch: expected {:?}, found {:?}",
-                        &self.ty, ty,
-                    )))
-                }
-            }
-            Array(aty) => {
-                if let Array(aty2) = &self.ty {
-                    // XXX(unimpl) does not check array lengths
-                    if aty.dimensions.len() != aty2.dimensions.len() {
-                        Err(ZVisitorError(format!(
-                            "array type mismatch: expected {}-dimensional array, found {}-dimensional array",
-                            aty2.dimensions.len(),
-                            aty.dimensions.len(),
-                        )))
-                    } else {
-                        // XXX(perf) avoid clone?
-                        let target = bos_to_type(aty2.ty.clone());
-                        let mut source = bos_to_type(aty.ty.clone());
-                        ZTypeEquality::new(self.walker, &target).visit_type(&mut source)
-                    }
-                } else {
-                    Err(ZVisitorError(format!(
-                        "type mismatch: expected {:?}, found {:?}",
-                        &self.ty, ty,
-                    )))
-                }
-            }
-            Struct(sty) => {
-                if let Struct(sty2) = &self.ty {
-                    if &sty.id.value != &sty2.id.value {
-                        Err(ZVisitorError(format!(
-                            "struct type mismatch: expected {:?}, found {:?}",
-                            &sty2.id.value, &sty.id.value,
-                        )))
-                    } else {
-                        Ok(())
-                    }
-                } else {
-                    Err(ZVisitorError(format!(
-                        "type mismatch: expected {:?}, found {:?}",
-                        &self.ty, ty,
-                    )))
-                }
-            }
-        }
+fn eq_basic_type<'ast>(ty: &ast::BasicType<'ast>, ty2: &ast::BasicType<'ast>) -> ZVisitorResult {
+    use ast::BasicType::*;
+    match (ty, ty2) {
+        (Field(_), Field(_)) => Ok(()),
+        (Boolean(_), Boolean(_)) => Ok(()),
+        (U8(_), U8(_)) => Ok(()),
+        (U16(_), U16(_)) => Ok(()),
+        (U32(_), U32(_)) => Ok(()),
+        (U64(_), U64(_)) => Ok(()),
+        _ => Err(ZVisitorError(format!(
+            "basic type mismatch: expected {:?}, found {:?}",
+            ty, ty2,
+        ))),
+    }
+}
+
+fn eq_array_type<'ast>(ty: &ast::ArrayType<'ast>, ty2: &ast::ArrayType<'ast>) -> ZVisitorResult {
+    use ast::BasicOrStructType::*;
+    if ty.dimensions.len() != ty2.dimensions.len() {
+        return Err(ZVisitorError(format!(
+            "array type mismatch: expected {}-dimensional array, found {}-dimensional array",
+            ty.dimensions.len(),
+            ty2.dimensions.len(),
+        )));
+    }
+    match (&ty.ty, &ty2.ty) {
+        (Basic(bty), Basic(bty2)) => eq_basic_type(bty, bty2),
+        (Struct(sty), Struct(sty2)) => eq_struct_type(sty, sty2),
+        _ => Err(ZVisitorError(format!(
+            "array type mismatch: expected elms of type {:?}, found {:?}",
+            &ty.ty, &ty2.ty,
+        ))),
+    }
+}
+
+fn eq_struct_type<'ast>(ty: &ast::StructType<'ast>, ty2: &ast::StructType<'ast>) -> ZVisitorResult {
+    // XXX(unimpl) can monomorphization break this?
+    if &ty.id.value != &ty2.id.value {
+        Err(ZVisitorError(format!(
+            "struct type mismatch: expected {:?}, found {:?}",
+            &ty.id.value, &ty2.id.value,
+        )))
+    } else {
+        Ok(())
     }
 }
 
@@ -1391,8 +1371,8 @@ impl<'ast, 'ret, 'wlk> ZVisitorMut<'ast> for ZExpressionTyper<'ast, 'ret, 'wlk> 
         match (ty2, ty3) {
             (Some(t), None) => self.ty.replace(t),
             (None, Some(t)) => self.ty.replace(t),
-            (Some(t1), Some(mut t2)) => {
-                ZTypeEquality::new(self.walker, &t1).visit_type(&mut t2)?;
+            (Some(t1), Some(t2)) => {
+                eq_type(&t1, &t2)?;
                 self.ty.replace(t2)
             }
             (None, None) => None,
@@ -1422,8 +1402,8 @@ impl<'ast, 'ret, 'wlk> ZVisitorMut<'ast> for ZExpressionTyper<'ast, 'ret, 'wlk> 
                 if let Some(ty) = match (ty_l, ty_r) {
                     (Some(t), None) => Some(t),
                     (None, Some(t)) => Some(t),
-                    (Some(t1), Some(mut t2)) => {
-                        ZTypeEquality::new(self.walker, &t1).visit_type(&mut t2)?;
+                    (Some(t1), Some(t2)) => {
+                        eq_type(&t1, &t2)?;
                         Some(t2)
                     }
                     (None, None) => None,
@@ -1570,7 +1550,7 @@ impl<'ast, 'ret, 'wlk> ZVisitorMut<'ast> for ZExpressionTyper<'ast, 'ret, 'wlk> 
         ex.iter_mut().try_for_each(|soe| {
             self.visit_spread_or_expression(soe)?;
             if let Some(ty) = self.take() {
-                let mut ty = if matches!(soe, ast::SpreadOrExpression::Expression(_)) {
+                let ty = if matches!(soe, ast::SpreadOrExpression::Expression(_)) {
                     ast::Type::Array(self.arrayize(
                         ty,
                         ast::Expression::Literal(ast::LiteralExpression::HexLiteral(
@@ -1589,7 +1569,7 @@ impl<'ast, 'ret, 'wlk> ZVisitorMut<'ast> for ZExpressionTyper<'ast, 'ret, 'wlk> 
                 };
 
                 if let Some(acc) = &acc_ty {
-                    ZTypeEquality::new(self.walker, acc).visit_type(&mut ty)?;
+                    eq_type(acc, &ty)?;
                 } else {
                     acc_ty.replace(ty);
                 }
@@ -1801,8 +1781,8 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         ty: ast::Type<'ast>,
         pf: &mut ast::PostfixExpression<'ast>,
     ) -> ZVisitorResult {
-        let mut acc_ty = self.get_postfix_ty(pf)?;
-        ZTypeEquality::new(self, &ty).visit_type(&mut acc_ty)
+        let acc_ty = self.get_postfix_ty(pf)?;
+        eq_type(&ty, &acc_ty)
     }
 
     fn unify_array_initializer(
@@ -1929,8 +1909,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         ty: ast::Type<'ast>,
         ie: &mut ast::IdentifierExpression<'ast>,
     ) -> ZVisitorResult {
-        self.lookup_type(ie)
-            .and_then(|mut ity| ZTypeEquality::new(self, &ty).visit_type(&mut ity))
+        self.lookup_type(ie).and_then(|ity| eq_type(&ty, &ity))
     }
 
     fn unify_ternary(
@@ -2004,8 +1983,8 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                             (None, Some(Basic(_))) => Ok((rty.clone().unwrap(), rty.unwrap())),
                             (Some(Basic(_)), Some(Basic(_))) => {
                                 let lty = lty.unwrap();
-                                let mut rty = rty.unwrap();
-                                ZTypeEquality::new(self, &lty).visit_type(&mut rty)
+                                let rty = rty.unwrap();
+                                eq_type(&lty, &rty)
                                     .map_err(|e|
                                     ZVisitorError(format!(
                                         "ZStatementWalker: got differing types {:?}, {:?} for lhs, rhs of expr:\n{}\n{}",
