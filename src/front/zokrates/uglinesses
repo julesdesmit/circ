@@ -1,0 +1,21 @@
+overloading: 
+    Functions are imported by name. If many functions have the same name
+    but different signatures, all of them get imported, and which one to
+    use in a particular call is inferred. (ZoK manual section 3.8)
+    %%
+        disallow explicitly?
+
+inferred types for decimal literals (ZoK manual section 3.2)
+    inside expressions
+    in assignments if LHS
+    add "untypedInteger" and unify as we go?
+
+multi-assignment (unimplemented right now)
+
+generics (maybe this is OK...)
+
+add array-membership operator
+add arithmetic-progression literal (to use with array-membership op)
+should we make range checks explicit in IR?
+    we have power-of-2 right now
+    add non-power-of-2 range check?
