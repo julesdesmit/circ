@@ -101,6 +101,7 @@ struct ZGen<'ast> {
     generics_stack: Vec<HashMap<String, T>>,
     functions: HashMap<PathBuf, HashMap<String, ast::FunctionDefinition<'ast>>>,
     structs: HashMap<PathBuf, HashMap<String, ast::StructDefinition<'ast>>>,
+    str_tys: HashMap<PathBuf, HashMap<String, Ty>>,
     constants: HashMap<PathBuf, HashMap<String, (ast::Type<'ast>, T)>>,
     import_map: HashMap<PathBuf, HashMap<String, (PathBuf, String)>>,
     mode: Mode,
@@ -132,6 +133,7 @@ impl<'ast> ZGen<'ast> {
             generics_stack: Vec::new(),
             functions: HashMap::new(),
             structs: HashMap::new(),
+            str_tys: HashMap::new(),
             constants: HashMap::new(),
             import_map: HashMap::new(),
             mode,
@@ -231,7 +233,7 @@ impl<'ast> ZGen<'ast> {
                             if decl_ty != ty {
                                 self.err(
                                     format!(
-                                        "Assignment type mismatch: {} annotatved vs {} actual",
+                                        "Assignment type mismatch: {} annotated vs {} actual",
                                         decl_ty, ty,
                                     ),
                                     &d.span,
@@ -437,8 +439,7 @@ impl<'ast> ZGen<'ast> {
                 Ok(T::Array(ty, vec![v; n]))
             }
             ast::Expression::Postfix(p) => {
-                // Assume no functions in arrays, etc.
-                // XXX(rsw) is this a reasonable assumption? probably...
+                // XXX(assume) no functions in arrays, etc.
                 let (base, accs) = if let Some(ast::Access::Call(c)) = p.accesses.first() {
                     debug!("Call: {}", p.id.value);
                     let (f_path, f_name) = self.deref_import(&p.id.value);
@@ -588,7 +589,7 @@ impl<'ast> ZGen<'ast> {
         }
         // get return type
         let ret_ty = f.returns.first().map(|r| self.type_(r));
-        // setup stack frame for entry function
+        // set up stack frame for entry function
         self.circ.enter_fn(n.to_owned(), ret_ty.clone());
         for p in f.parameters.iter() {
             let ty = self.type_(&p.ty);
@@ -915,7 +916,31 @@ impl<'ast> ZGen<'ast> {
                     .map(|d| self.const_int(d))
                     .fold(b, |b, d| Ty::Array(d as usize, Box::new(b)))
             }
-            ast::Type::Struct(s) => self.circ.get_type(&s.id.value).clone(),
+            ast::Type::Struct(s) => {
+                // self.circ.get_type(&s.id.value).clone(),
+                // struct should already have been monomorphized!
+                if !s.explicit_generics.is_some() {
+                    self.err(format!("Found non-monomorphized struct {}", &s.id.value), &s.span);
+                }
+                // get the type if already declared, else declare it
+                match self.get_str_ty(&s.id.value) {
+                    Some(t) => t.clone(),
+                    None => {
+                        let sdef = self.get_struct(&s.id.value).unwrap_or_else(||
+                            self.err(format!("No such struct {}", &s.id.value), &s.span)
+                        );
+                        if !sdef.generics.is_empty() {
+                            self.err(format!("Found non-monomorphized struct {}", &s.id.value), &s.span);
+                        }
+                        let ty = Ty::Struct(
+                            s.id.value.clone(),
+                            sdef.fields.clone().into_iter().map(|f| (f.id.value, self.type_(&f.ty))).collect()
+                        );
+                        assert!(self.insert_str_ty(&s.id.value, ty.clone()).is_none());
+                        ty
+                    }
+                }
+            }
         }
     }
 
@@ -1085,6 +1110,11 @@ impl<'ast> ZGen<'ast> {
         self.asts = t;
     }
 
+    fn get_str_ty(&self, struct_id: &str) -> Option<&Ty> {
+        let (s_path, s_name) = self.deref_import(struct_id);
+        self.str_tys.get(&s_path).and_then(|m| m.get(&s_name))
+    }
+
     fn get_struct(&self, struct_id: &str) -> Option<&ast::StructDefinition<'ast>> {
         let (s_path, s_name) = self.deref_import(struct_id);
         self.structs.get(&s_path).and_then(|m| m.get(&s_name))
@@ -1111,6 +1141,18 @@ impl<'ast> ZGen<'ast> {
             .and_then(|m| m.get_mut(&s_name))
     }
     */
+
+    fn insert_str_ty(
+        &mut self,
+        id: &str,
+        ty: Ty,
+    ) -> Option<Ty> {
+        let (s_path, s_name) = self.deref_import(id);
+        self.str_tys
+            .get_mut(&s_path)
+            .unwrap()
+            .insert(s_name, ty)
+    }
 
     fn insert_struct(
         &mut self,
