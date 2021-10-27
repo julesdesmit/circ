@@ -2816,7 +2816,7 @@ impl<'ast> ZVisitorMut<'ast> for ZConstLiteralRewriter {
 }
 
 fn span_to_string(span: &ast::Span) -> String {
-    span.lines().intersperse("\n").collect::<String>()
+    span.lines().collect::<String>()
 }
 
 fn bos_to_type<'ast>(bos: ast::BasicOrStructType<'ast>) -> ast::Type<'ast> {

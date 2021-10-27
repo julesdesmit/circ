@@ -151,9 +151,7 @@ impl<'ast> ZGen<'ast> {
     fn err<E: Display>(&self, e: E, s: &ast::Span) -> ! {
         println!("Error: {}", e);
         println!("In: {}", self.cur_path().display());
-        for l in s.lines() {
-            println!("  {}", l);
-        }
+        s.lines().for_each(|l| { print!("  {}", l); });
         std::process::exit(1)
     }
 
