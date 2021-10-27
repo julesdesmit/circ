@@ -1628,11 +1628,15 @@ pub(super) struct ZStatementWalker<'ast, 'ret> {
 
 impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
     pub fn new(
+        prms: &'ret [ast::Parameter<'ast>],
         rets: &'ret [ast::Type<'ast>],
         gens: &'ret [ast::IdentifierExpression<'ast>],
         zgen: &'ret mut ZGen<'ast>,
     ) -> Self {
-        let vars = vec![HashMap::new()];
+        let vars = vec![prms
+            .iter()
+            .map(|p| (p.id.value.clone(), p.ty.clone()))
+            .collect()];
         Self {
             rets,
             gens,

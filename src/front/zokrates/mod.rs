@@ -1211,6 +1211,7 @@ impl<'ast> ZGen<'ast> {
 
                     // go through stmts rewriting literals and generics
                     let mut sw = ZStatementWalker::new(
+                        f_ast.parameters.as_ref(),
                         f_ast.returns.as_ref(),
                         f_ast.generics.as_ref(),
                         self,
