@@ -991,6 +991,9 @@ impl<'ast> ZGen<'ast> {
 
         // 3. visit struct definitions, inferring types for literals
         // XXX(unimpl) visiting struct defs after const defs makes struct consts harder to support
+        //             but makes it possible to support consts in struct def'n.
+        // TODO(maybe) process const defs and struct defs in order, thereby allowing both as long
+        //             as all uses are after the respective definitions
         self.visit_structs(files.clone());
 
         // 4. visit function definitions, inferring types and generics
