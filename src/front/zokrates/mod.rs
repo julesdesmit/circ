@@ -963,7 +963,7 @@ impl<'ast> ZGen<'ast> {
                 visited.push((fname, iname));
                 let mut n = nv;
                 let mut i = iv;
-                while let Some((nn, ii)) = self.import_map.get(n).unwrap().get(i) {
+                while let Some((nn, ii)) = self.import_map.get(n).and_then(|m| m.get(i)) {
                     visited.push((n, i));
                     n = nn;
                     i = ii;
