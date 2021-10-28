@@ -1092,6 +1092,7 @@ impl<'ast> ZGen<'ast> {
             })
             .iter()
             .map(|idx| std::mem::take(ig.node_weight_mut(*idx).unwrap()))
+            .filter(|p| self.asts.contains_key(p)) // filter out EMBED (and other specials?)
             .collect()
     }
 
