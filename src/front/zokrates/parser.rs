@@ -67,9 +67,6 @@ impl ZStdLib {
     /// Turn `child`, relative to `parent` (or to the standard libary!), into an absolute path.
     pub fn canonicalize(&self, parent: &Path, child: &str) -> PathBuf {
         debug!("Looking for {} from {}", child, parent.display());
-        if child.contains("EMBED") {
-            return PathBuf::from(child);
-        }
         let paths = vec![parent.to_path_buf(), self.path.clone()];
         for mut p in paths {
             p.push(child);
@@ -137,12 +134,7 @@ impl<'a> Loader for &'a ZLoad {
                         ast::ImportDirective::Main(m) => &m.source.value,
                         ast::ImportDirective::From(m) => &m.source.value,
                     };
-                    let p = self.stdlib.canonicalize(&c, ext);
-                    if p.to_str().map(|s| !s.contains("EMBED")).unwrap_or(true) {
-                        Some(p)
-                    } else {
-                        None
-                    }
+                    Some(self.stdlib.canonicalize(&c, ext))
                 } else {
                     None
                 }
