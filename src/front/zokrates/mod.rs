@@ -385,7 +385,7 @@ impl<'ast> ZGen<'ast> {
             ast::BinaryOperator::Gt => ugt,
             ast::BinaryOperator::Lte => ule,
             ast::BinaryOperator::Gte => uge,
-            ast::BinaryOperator::Pow => unimplemented!(),
+            ast::BinaryOperator::Pow => pow,
         }
     }
 

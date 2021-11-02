@@ -325,6 +325,30 @@ pub fn uge(a: T, b: T) -> Result<T, String> {
     wrap_bin_pred(">=", Some(uge_uint), None, None, a, b)
 }
 
+pub fn pow(a: T, b: T) -> Result<T, String> {
+    if !matches!(b, T::Uint(32, _)) || !matches!(a, T::Field(_)) {
+        Err(format!("Cannot compute {} ** {} : must be Field ** U32", a, b))
+    } else if let T::Field(a) = a {
+        let b = const_int(b)?;
+        if b == 0 {
+            return Ok(T::Field(pf_lit(Integer::from(1))));
+        }
+        let res = (0..b.significant_bits() - 1)
+            .rev()
+            .fold(a.clone(), |acc, ix| {
+                let acc = mul_field(acc.clone(), acc);
+                if b.get_bit(ix) {
+                    mul_field(acc, a.clone())
+                } else {
+                    acc
+                }
+            });
+        Ok(T::Field(res))
+    } else {
+        unreachable!()
+    }
+}
+
 fn wrap_un_op(
     name: &str,
     fu: Option<fn(Term) -> Term>,
