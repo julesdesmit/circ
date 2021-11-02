@@ -117,17 +117,20 @@ impl T {
     }
 
     // XXX(rsw) hrm is there a nicer way to do this?
-    pub fn new_u8(u: Term) -> Self {
-        Self::Uint(8, u)
+    pub fn new_field_isize(v: isize) -> Self {
+        Self::Field(pf_lit(v))
     }
-    pub fn new_u16(u: Term) -> Self {
-        Self::Uint(16, u)
+    pub fn new_u8_isize(v: isize) -> Self {
+        Self::Uint(8, bv_lit(8, v as usize))
     }
-    pub fn new_u32(u: Term) -> Self {
-        Self::Uint(32, u)
+    pub fn new_u16_isize(v: isize) -> Self {
+        Self::Uint(16, bv_lit(16, v as usize))
     }
-    pub fn new_u64(u: Term) -> Self {
-        Self::Uint(64, u)
+    pub fn new_u32_isize(v: isize) -> Self {
+        Self::Uint(32, bv_lit(32, v as usize))
+    }
+    pub fn new_u64_isize(v: isize) -> Self {
+        Self::Uint(64, bv_lit(64, v as usize))
     }
 }
 
