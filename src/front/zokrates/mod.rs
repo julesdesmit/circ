@@ -194,6 +194,16 @@ impl<'ast> ZGen<'ast> {
             }
             ast::Statement::Iteration(i) => {
                 let ty = self.type_(&i.ty);
+                // iteration type constructor - must be Field or u*
+                let ival_cons = match ty {
+                    Ty::Field => T::Field,
+                    Ty::Uint(8) => T::new_u8,
+                    Ty::Uint(16) => T::new_u16,
+                    Ty::Uint(32) => T::new_u32,
+                    Ty::Uint(64) => T::new_u64,
+                    _ => self.err("Iteration variable must be Field or Unit", &i.span),
+                };
+
                 let s = self.const_int(&i.from);
                 let e = self.const_int(&i.to);
                 let v_name = i.index.value.clone();
@@ -204,8 +214,7 @@ impl<'ast> ZGen<'ast> {
                     self.circ.enter_scope();
                     let ass_res = self
                         .circ
-                        // XXX(rsw) does this assignment cast correctly?
-                        .assign(Loc::local(v_name.clone()), Val::Term(T::Field(pf_lit(j))));
+                        .assign(Loc::local(v_name.clone()), Val::Term(ival_cons(pf_lit(j))));
                     self.unwrap(ass_res, &i.index.span);
                     for s in &i.statements {
                         self.stmt(s);

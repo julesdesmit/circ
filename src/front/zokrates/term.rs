@@ -114,6 +114,20 @@ impl T {
     pub fn new_array(v: Vec<T>) -> Result<T, String> {
         array(v)
     }
+
+    // XXX(rsw) hrm is there a nicer way to do this?
+    pub fn new_u8(u: Term) -> Self {
+        Self::Uint(8, u)
+    }
+    pub fn new_u16(u: Term) -> Self {
+        Self::Uint(16, u)
+    }
+    pub fn new_u32(u: Term) -> Self {
+        Self::Uint(32, u)
+    }
+    pub fn new_u64(u: Term) -> Self {
+        Self::Uint(64, u)
+    }
 }
 
 impl Display for T {
