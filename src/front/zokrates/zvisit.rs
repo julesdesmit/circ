@@ -2582,6 +2582,7 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
                 }
             }
             TypedIdentifier(ti) => {
+                ZConstLiteralRewriter::new(None).visit_type(&mut ti.ty)?;
                 let ty = if let ast::Type::Struct(sty) = &mut ti.ty {
                     self.monomorphize_struct(sty)?
                 } else {
