@@ -478,19 +478,24 @@ pub fn field_store(struct_: T, field: &str, val: T) -> Result<T, String> {
     }
 }
 
+// XXX(opt) can this take &T instead of T?
 pub fn array_select(array: T, idx: T) -> Result<T, String> {
-    match (array, idx) {
-        (T::Array(_, list), T::Field(idx)) => {
-            let mut it = list.into_iter().enumerate();
-            let first = it
-                .next()
-                .ok_or_else(|| format!("Cannot index empty array"))?;
-            it.fold(Ok(first.1), |acc, (i, elem)| {
-                ite(term![Op::Eq; pf_lit(i), idx.clone()], elem, acc?)
-            })
-        }
-        (a, b) => Err(format!("Cannot index {} by {}", b, a)),
-    }
+    let list = match array {
+        T::Array(_, list) => Ok(list),
+        a => Err(format!("Cannot index non-array type {}", a)),
+    }?;
+    // XXX(rsw) should we actually allow indexing with both Field and u*?
+    let idx = match idx {
+        T::Field(idx) => Ok(idx),
+        T::Uint(_, idx) => Ok(idx),
+        b => Err(format!("Cannot index array with non-numeric type {}", b)),
+    }?;
+
+    let mut it = list.into_iter().enumerate();
+    let first = it.next().ok_or_else(|| format!("Cannot index empty array"))?;
+    it.fold(Ok(first.1), |acc, (i, elem)| {
+        ite(term![Op::Eq; pf_lit(i), idx.clone()], elem, acc?)
+    })
 }
 
 pub fn array_store(array: T, idx: T, val: T) -> Result<T, String> {
@@ -502,7 +507,7 @@ pub fn array_store(array: T, idx: T, val: T) -> Result<T, String> {
                 .map(|(i, elem)| ite(term![Op::Eq; pf_lit(i), idx.clone()], val.clone(), elem))
                 .collect::<Result<Vec<_>, _>>()?,
         )),
-        (a, b) => Err(format!("Cannot index {} by {}", b, a)),
+        (arr, idx) => Err(format!("Cannot index {} using {}", arr, idx)),
     }
 }
 
