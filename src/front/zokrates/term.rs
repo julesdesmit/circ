@@ -4,6 +4,7 @@ use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 
 use lazy_static::lazy_static;
+use log::warn;
 use rug::Integer;
 
 use crate::circify::{CirCtx, Embeddable};
@@ -486,7 +487,10 @@ pub fn array_select(array: T, idx: T) -> Result<T, String> {
     }?;
     // XXX(rsw) should we actually allow indexing with both Field and u*?
     let idx = match idx {
-        T::Field(idx) => Ok(idx),
+        T::Field(idx) => {
+            warn!("ZoKrates front-end indexes array with Field type");
+            Ok(idx)
+        }
         T::Uint(_, idx) => Ok(idx),
         b => Err(format!("Cannot index array with non-numeric type {}", b)),
     }?;
