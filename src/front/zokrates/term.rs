@@ -8,6 +8,7 @@ use log::warn;
 use rug::Integer;
 
 use crate::circify::{CirCtx, Embeddable};
+use crate::ir::opt::cfold::fold as constant_fold;
 use crate::ir::term::*;
 
 lazy_static! {
@@ -413,14 +414,20 @@ pub fn not(a: T) -> Result<T, String> {
 
 pub fn const_int(a: T) -> Result<Integer, String> {
     let s = match &a {
-        T::Field(b) => match &b.op {
-            Op::Const(Value::Field(f)) => Some(f.i().clone()),
-            _ => None,
-        },
-        T::Uint(_, i) => match &i.op {
-            Op::Const(Value::BitVector(f)) => Some(f.uint().clone()),
-            _ => None,
-        },
+        T::Field(b) => {
+            let folded = constant_fold(b);
+            match &folded.op {
+                Op::Const(Value::Field(f)) => Some(f.i().clone()),
+                _ => None,
+            }
+        }
+        T::Uint(_, i) => {
+            let folded = constant_fold(i);
+            match &folded.op {
+                Op::Const(Value::BitVector(f)) => Some(f.uint().clone()),
+                _ => None,
+            }
+        }
         _ => None,
     };
     s.ok_or_else(|| format!("{} is not a constant integer", a))
