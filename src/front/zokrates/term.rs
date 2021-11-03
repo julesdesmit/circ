@@ -117,20 +117,39 @@ impl T {
     }
 
     // XXX(rsw) hrm is there a nicer way to do this?
-    pub fn new_field_isize(v: isize) -> Self {
+    pub fn new_field<T>(v: T) -> Self
+    where
+        Integer: From<T>,
+    {
         Self::Field(pf_lit(v))
     }
-    pub fn new_u8_isize(v: isize) -> Self {
-        Self::Uint(8, bv_lit(8, v as usize))
+
+    pub fn new_u8<T>(v: T) -> Self
+    where
+        Integer: From<T>,
+    {
+        Self::Uint(8, bv_lit(v, 8))
     }
-    pub fn new_u16_isize(v: isize) -> Self {
-        Self::Uint(16, bv_lit(16, v as usize))
+
+    pub fn new_u16<T>(v: T) -> Self
+    where
+        Integer: From<T>,
+    {
+        Self::Uint(16, bv_lit(v, 16))
     }
-    pub fn new_u32_isize(v: isize) -> Self {
-        Self::Uint(32, bv_lit(32, v as usize))
+
+    pub fn new_u32<T>(v: T) -> Self
+    where
+        Integer: From<T>,
+    {
+        Self::Uint(32, bv_lit(v, 32))
     }
-    pub fn new_u64_isize(v: isize) -> Self {
-        Self::Uint(64, bv_lit(64, v as usize))
+
+    pub fn new_u64<T>(v: T) -> Self
+    where
+        Integer: From<T>,
+    {
+        Self::Uint(64, bv_lit(v, 64))
     }
 }
 

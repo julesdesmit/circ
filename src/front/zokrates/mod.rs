@@ -196,11 +196,11 @@ impl<'ast> ZGen<'ast> {
                 let ty = self.type_(&i.ty);
                 // iteration type constructor - must be Field or u*
                 let ival_cons = match ty {
-                    Ty::Field => T::new_field_isize,
-                    Ty::Uint(8) => T::new_u8_isize,
-                    Ty::Uint(16) => T::new_u16_isize,
-                    Ty::Uint(32) => T::new_u32_isize,
-                    Ty::Uint(64) => T::new_u64_isize,
+                    Ty::Field => T::new_field,
+                    Ty::Uint(8) => T::new_u8,
+                    Ty::Uint(16) => T::new_u16,
+                    Ty::Uint(32) => T::new_u32,
+                    Ty::Uint(64) => T::new_u64,
                     _ => self.err("Iteration variable must be Field or Unit", &i.span),
                 };
 
