@@ -448,15 +448,15 @@ impl<'ast> ZGen<'ast> {
             ast::Expression::Postfix(p) => {
                 // XXX(assume) no functions in arrays, etc.
                 let (base, accs) = if let Some(ast::Access::Call(c)) = p.accesses.first() {
-                    debug!("Call: {}", p.id.value);
                     let (f_path, f_name) = self.deref_import(&p.id.value);
+                    debug!("Call: {} {:?} {:?}", p.id.value, f_path, f_name);
                     let args = c
                         .arguments
                         .expressions
                         .iter()
                         .map(|e| self.expr(e))
                         .collect::<Vec<_>>();
-                    let res = if f_path.to_string_lossy().starts_with("EMBED") {
+                    let res = if self.stdlib.is_embed(&f_path) {
                         // builtins have no generics
                         if !c
                             .explicit_generics

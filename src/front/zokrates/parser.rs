@@ -67,7 +67,7 @@ impl ZStdLib {
     /// Turn `child`, relative to `parent` (or to the standard libary!), into an absolute path.
     pub fn canonicalize(&self, parent: &Path, child: &str) -> PathBuf {
         debug!("Looking for {} from {}", child, parent.display());
-        let paths = vec![parent.to_path_buf(), self.path.clone()];
+        let paths = [parent.to_path_buf(), self.path.clone()];
         for mut p in paths {
             p.push(child);
             if p.extension().is_none() {
@@ -79,6 +79,10 @@ impl ZStdLib {
             }
         }
         panic!("Could not find {} from {}", child, parent.display())
+    }
+    /// check if this path is the EMBED prototypes path
+    pub fn is_embed<P: AsRef<Path>>(&self, p: P) -> bool {
+        p.as_ref().starts_with(&self.path) && p.as_ref().file_stem().map(|s| s.to_str()).flatten() == Some("EMBED")
     }
 }
 
