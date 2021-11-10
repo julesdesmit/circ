@@ -594,10 +594,11 @@ pub fn uint_to_bits(u: T) -> Result<T, String> {
     }
 }
 
+// XXX(rsw) is it correct to enforce length here, vs. in (say) builtin_call in mod.rs?
 pub fn uint_from_bits(u: T) -> Result<T, String> {
     match u {
         T::Array(Ty::Bool, list) => match list.len() {
-            8 | 16 | 32 => Ok(T::Uint(
+            8 | 16 | 32 | 64 => Ok(T::Uint(
                 list.len(),
                 term(
                     Op::BvConcat,

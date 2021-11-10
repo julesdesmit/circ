@@ -159,15 +159,16 @@ impl<'ast> ZGen<'ast> {
         r.unwrap_or_else(|e| self.err(e, s))
     }
 
-    fn builtin_call(fn_name: &str, mut args: Vec<T>) -> Result<T, String> {
-        match fn_name {
-            "EMBED/u8_to_bits" if args.len() == 1 => uint_to_bits(args.pop().unwrap()),
-            "EMBED/u16_to_bits" if args.len() == 1 => uint_to_bits(args.pop().unwrap()),
-            "EMBED/u32_to_bits" if args.len() == 1 => uint_to_bits(args.pop().unwrap()),
-            "EMBED/u8_from_bits" if args.len() == 1 => uint_from_bits(args.pop().unwrap()),
-            "EMBED/u16_from_bits" if args.len() == 1 => uint_from_bits(args.pop().unwrap()),
-            "EMBED/u32_from_bits" if args.len() == 1 => uint_from_bits(args.pop().unwrap()),
-            "EMBED/unpack" if args.len() == 1 => field_to_bits(args.pop().unwrap()),
+    fn builtin_call(f_name: &str, mut args: Vec<T>) -> Result<T, String> {
+        if args.len() != 1 {
+            return Err(format!("Got {} args to EMBED/{}, expected 1", args.len(), f_name));
+        }
+
+        match f_name {
+            "u8_to_bits" | "u16_to_bits" | "u32_to_bits" | "u64_to_bits" => uint_to_bits(args.pop().unwrap()),
+            "u8_from_bits" | "u16_from_bits" | "u32_from_bits" | "u64_from_bits" => uint_from_bits(args.pop().unwrap()),
+            "unpack" => field_to_bits(args.pop().unwrap()),
+            "bit_array_le" => unimplemented!(),
             _ => Err(format!("Unknown builtin '{}'", fn_name)),
         }
     }
@@ -466,7 +467,7 @@ impl<'ast> ZGen<'ast> {
                         {
                             self.err("generic builtins not supported", &c.span);
                         }
-                        Self::builtin_call(f_path.to_str().unwrap(), args).unwrap()
+                        Self::builtin_call(&f_name, args).unwrap()
                     } else {
                         let f = self
                             .functions
@@ -1101,7 +1102,7 @@ impl<'ast> ZGen<'ast> {
             })
             .iter()
             .map(|idx| std::mem::take(ig.node_weight_mut(*idx).unwrap()))
-            .filter(|p| self.asts.contains_key(p)) // filter out EMBED (and other specials?)
+            .filter(|p| self.asts.contains_key(p))
             .collect()
     }
 
