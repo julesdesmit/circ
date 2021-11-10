@@ -160,6 +160,8 @@ impl<'ast> ZGen<'ast> {
     }
 
     fn builtin_call(f_name: &str, mut args: Vec<T>, mut generics: Vec<T>) -> Result<T, String> {
+        debug!("Builtin Call: {} {:?} {:?}", f_name, args, generics);
+
         if args.len() != 1 {
             return Err(format!("Got {} args to EMBED/{}, expected 1", args.len(), f_name));
         }
