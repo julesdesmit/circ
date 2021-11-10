@@ -159,17 +159,45 @@ impl<'ast> ZGen<'ast> {
         r.unwrap_or_else(|e| self.err(e, s))
     }
 
-    fn builtin_call(f_name: &str, mut args: Vec<T>) -> Result<T, String> {
+    fn builtin_call(f_name: &str, mut args: Vec<T>, mut generics: Vec<T>) -> Result<T, String> {
         if args.len() != 1 {
             return Err(format!("Got {} args to EMBED/{}, expected 1", args.len(), f_name));
         }
 
         match f_name {
-            "u8_to_bits" | "u16_to_bits" | "u32_to_bits" | "u64_to_bits" => uint_to_bits(args.pop().unwrap()),
-            "u8_from_bits" | "u16_from_bits" | "u32_from_bits" | "u64_from_bits" => uint_from_bits(args.pop().unwrap()),
-            "unpack" => field_to_bits(args.pop().unwrap()),
-            "bit_array_le" => unimplemented!(),
-            _ => Err(format!("Unknown builtin '{}'", fn_name)),
+            "u8_to_bits" | "u16_to_bits" | "u32_to_bits" | "u64_to_bits" => {
+                if !generics.is_empty() {
+                    Err(format!("Got {} generic args to EMBED/{}, expected 0", generics.len(), f_name))
+                } else {
+                    uint_to_bits(args.pop().unwrap())
+                }
+            }
+            "u8_from_bits" | "u16_from_bits" | "u32_from_bits" | "u64_from_bits" => {
+                if !generics.is_empty() {
+                    Err(format!("Got {} generic args to EMBED/{}, expected 0", generics.len(), f_name))
+                } else {
+                    uint_from_bits(args.pop().unwrap())
+                }
+            }
+            "unpack" => {
+                if generics.len() != 1 {
+                    Err(format!("Got {} generic args to EMBED/unpack, expected 1", generics.len()))
+                } else {
+                    let nbits = const_int(generics.pop().unwrap())?
+                        .to_usize()
+                        .ok_or_else(|| "builtin_call failed to convert unpack's N to usize".to_string())?;
+                    field_to_bits(args.pop().unwrap(), nbits)
+                }
+            }
+            "bit_array_le" => {
+                if generics.len() != 1 {
+                    Err(format!("Got {} generic args to EMBED/bit_array_le, expected 1", generics.len()))
+                } else {
+                    // XXX(unimpl) should be easy
+                    unimplemented!()
+                }
+            }
+            _ => Err(format!("Unknown builtin '{}'", f_name)),
         }
     }
 
@@ -457,17 +485,41 @@ impl<'ast> ZGen<'ast> {
                         .iter()
                         .map(|e| self.expr(e))
                         .collect::<Vec<_>>();
+                    let generics = c.explicit_generics
+                        .as_ref()
+                        .map(|g| {
+                            g.values
+                                .iter()
+                                .map(|cgv| match cgv {
+                                    ast::ConstantGenericValue::Value(l) => self.literal_(&l),
+                                    ast::ConstantGenericValue::Identifier(i) => {
+                                        if let Some(v) = self.generic_lookup_(&i.value) {
+                                            v.clone()
+                                        } else if let Some(v) = self.const_lookup_(&i.value)
+                                        {
+                                            v.clone()
+                                        } else {
+                                            self.err(
+                                                format!(
+                                                    "no const {} in current context",
+                                                    &i.value
+                                                ),
+                                                &i.span,
+                                            );
+                                        }
+                                    }
+                                    ast::ConstantGenericValue::Underscore(u) => {
+                                        self.err(
+                                            "non-monomorphized generic argument",
+                                            &u.span,
+                                        );
+                                    }
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_else(|| Vec::new());
                     let res = if self.stdlib.is_embed(&f_path) {
-                        // builtins have no generics
-                        if !c
-                            .explicit_generics
-                            .as_ref()
-                            .map(|g| g.values.is_empty())
-                            .unwrap_or(true)
-                        {
-                            self.err("generic builtins not supported", &c.span);
-                        }
-                        Self::builtin_call(&f_name, args).unwrap()
+                        self.unwrap(Self::builtin_call(&f_name, args, generics), &c.span)
                     } else {
                         let f = self
                             .functions
@@ -480,52 +532,15 @@ impl<'ast> ZGen<'ast> {
                                 self.err(format!("No function '{}'", &f_name), &p.span)
                             })
                             .clone();
-                        if f.generics.len()
-                            != c.explicit_generics
-                                .as_ref()
-                                .map(|g| g.values.len())
-                                .unwrap_or(0)
-                        {
-                            self.err("cannot determine generic params for function call", &c.span);
+                        if f.generics.len() != generics.len() {
+                            self.err("wrong number of generic params for function call", &c.span);
                         }
                         self.file_stack.push(f_path);
-                        self.generics_stack.push(
-                            c.explicit_generics
-                                .as_ref()
-                                .map(|g| {
-                                    g.values
-                                        .iter()
-                                        .zip(&f.generics[..])
-                                        .map(|(cgv, n)| match cgv {
-                                            ast::ConstantGenericValue::Value(l) => {
-                                                (n.value.clone(), self.literal_(&l))
-                                            }
-                                            ast::ConstantGenericValue::Identifier(i) => {
-                                                if let Some(v) = self.generic_lookup_(&i.value) {
-                                                    (n.value.clone(), v.clone())
-                                                } else if let Some(v) = self.const_lookup_(&i.value)
-                                                {
-                                                    (n.value.clone(), v.clone())
-                                                } else {
-                                                    self.err(
-                                                        format!(
-                                                            "no const {} in current context",
-                                                            &i.value
-                                                        ),
-                                                        &i.span,
-                                                    );
-                                                }
-                                            }
-                                            ast::ConstantGenericValue::Underscore(u) => {
-                                                self.err(
-                                                    "cannot resolve generic argument",
-                                                    &u.span,
-                                                );
-                                            }
-                                        })
-                                        .collect()
-                                })
-                                .unwrap_or_else(|| HashMap::new()),
+                        self.generics_stack.push(generics
+                            .into_iter()
+                            .zip(&f.generics[..])
+                            .map(|(g, n)| (n.value.clone(), g))
+                            .collect()
                         );
                         // XXX(unimpl) tuple returns not supported
                         assert!(f.returns.len() <= 1);

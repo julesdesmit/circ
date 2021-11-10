@@ -613,13 +613,13 @@ pub fn uint_from_bits(u: T) -> Result<T, String> {
     }
 }
 
-pub fn field_to_bits(f: T) -> Result<T, String> {
+pub fn field_to_bits(f: T, n: usize) -> Result<T, String> {
     match f {
         T::Field(t) => {
-            let u = term![Op::PfToBv(254); t];
+            let u = term![Op::PfToBv(n); t];
             Ok(T::Array(
                 Ty::Bool,
-                (0..254)
+                (0..n)
                     .map(|i| T::Bool(term![Op::BvBit(i); u.clone()]))
                     .collect(),
             ))
