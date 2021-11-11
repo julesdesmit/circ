@@ -161,28 +161,29 @@ impl<'ast> ZGen<'ast> {
 
     fn builtin_call(f_name: &str, mut args: Vec<T>, mut generics: Vec<T>) -> Result<T, String> {
         debug!("Builtin Call: {} {:?} {:?}", f_name, args, generics);
-
-        if args.len() != 1 {
-            return Err(format!("Got {} args to EMBED/{}, expected 1", args.len(), f_name));
-        }
-
         match f_name {
             "u8_to_bits" | "u16_to_bits" | "u32_to_bits" | "u64_to_bits" => {
-                if !generics.is_empty() {
+                if args.len() != 1 {
+                    Err(format!("Got {} args to EMBED/{}, expected 1", args.len(), f_name))
+                } else if !generics.is_empty() {
                     Err(format!("Got {} generic args to EMBED/{}, expected 0", generics.len(), f_name))
                 } else {
                     uint_to_bits(args.pop().unwrap())
                 }
             }
             "u8_from_bits" | "u16_from_bits" | "u32_from_bits" | "u64_from_bits" => {
-                if !generics.is_empty() {
+                if args.len() != 1 {
+                    Err(format!("Got {} args to EMBED/{}, expected 1", args.len(), f_name))
+                } else if !generics.is_empty() {
                     Err(format!("Got {} generic args to EMBED/{}, expected 0", generics.len(), f_name))
                 } else {
                     uint_from_bits(args.pop().unwrap())
                 }
             }
             "unpack" => {
-                if generics.len() != 1 {
+                if args.len() != 1 {
+                    Err(format!("Got {} args to EMBED/{}, expected 1", args.len(), f_name))
+                } else if generics.len() != 1 {
                     Err(format!("Got {} generic args to EMBED/unpack, expected 1", generics.len()))
                 } else {
                     let nbits = const_int(generics.pop().unwrap())?
@@ -192,14 +193,21 @@ impl<'ast> ZGen<'ast> {
                 }
             }
             "bit_array_le" => {
-                if generics.len() != 1 {
+                if args.len() != 2 {
+                    Err(format!("Got {} args to EMBED/{}, expected 1", args.len(), f_name))
+                } else if generics.len() != 1 {
                     Err(format!("Got {} generic args to EMBED/bit_array_le, expected 1", generics.len()))
                 } else {
-                    // XXX(unimpl) should be easy
-                    unimplemented!()
+                    let nbits = const_int(generics.pop().unwrap())?
+                        .to_usize()
+                        .ok_or_else(|| "builtin_call failed to convert bit_array_le's N to usize".to_string())?;
+
+                    let second_arg = args.pop().unwrap();
+                    let first_arg = args.pop().unwrap();
+                    bit_array_le(first_arg, second_arg, nbits)
                 }
             }
-            _ => Err(format!("Unknown builtin '{}'", f_name)),
+            _ => Err(format!("Unknown or unimplemented builtin '{}'", f_name)),
         }
     }
 

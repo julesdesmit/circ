@@ -600,17 +600,21 @@ pub fn uint_from_bits(u: T) -> Result<T, String> {
         T::Array(Ty::Bool, list) => match list.len() {
             8 | 16 | 32 | 64 => Ok(T::Uint(
                 list.len(),
-                term(
-                    Op::BvConcat,
-                    list.into_iter()
-                        .map(|z: T| -> Result<Term, String> { Ok(term![Op::BoolToBv; bool(z)?]) })
-                        .collect::<Result<Vec<_>, _>>()?,
-                ),
+                bv_from_bits(list)?,
             )),
             l => Err(format!("Cannot do uint-from-bits on len {} array", l,)),
         },
         u => Err(format!("Cannot do uint-from-bits on {}", u)),
     }
+}
+
+fn bv_from_bits(list: Vec<T>) -> Result<Term, String> {
+    Ok(term(
+        Op::BvConcat,
+        list.into_iter()
+            .map(|z: T| -> Result<Term, String> { Ok(term![Op::BoolToBv; bool(z)?]) })
+            .collect::<Result<Vec<_>, _>>()?
+    ))
 }
 
 pub fn field_to_bits(f: T, n: usize) -> Result<T, String> {
@@ -625,6 +629,23 @@ pub fn field_to_bits(f: T, n: usize) -> Result<T, String> {
             ))
         }
         u => Err(format!("Cannot do field-to-bits on {}", u)),
+    }
+}
+
+pub fn bit_array_le(a: T, b: T, n: usize) -> Result<T, String> {
+    match (a, b) {
+        (T::Array(Ty::Bool, lsa), T::Array(Ty::Bool, lsb)) => {
+            if lsa.len() != lsb.len() {
+                Err(format!("bit-array-le called on arrays with lengths {} != {}", lsa.len(), lsb.len()))
+            } else if lsa.len() != n || lsb.len() != n {
+                Err(format!("bit-array-le::<{}> called on arrays with length {}", n, lsa.len()))
+            } else {
+                let at = bv_from_bits(lsa)?;
+                let bt = bv_from_bits(lsb)?;
+                Ok(T::Bool(term![Op::BvBinPred(BvBinPred::Ule); at, bt]))
+            }
+        }
+        (a, b) => Err(format!("Cannot do bit-array-le on ({}, {})", a, b)),
     }
 }
 
