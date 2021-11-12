@@ -1586,7 +1586,7 @@ impl<'ast, 'ret, 'wlk> ZVisitorMut<'ast> for ZExpressionTyper<'ast, 'ret, 'wlk> 
         pfe: &mut ast::PostfixExpression<'ast>,
     ) -> ZVisitorResult {
         assert!(self.ty.is_none());
-        self.ty.replace(self.walker.get_postfix_ty(pfe)?);
+        self.ty.replace(self.walker.get_postfix_ty(pfe, None)?);
         Ok(())
     }
 }
@@ -1680,6 +1680,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         &self,
         fdef: &ast::FunctionDefinition<'ast>,
         call: &mut ast::CallAccess<'ast>,
+        _rty: Option<&ast::Type<'ast>>,
     ) -> ZResult<ast::Type<'ast>> {
         if call.arguments.expressions.len() != fdef.parameters.len() {
             return Err(ZVisitorError(format!(
@@ -1697,19 +1698,31 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                 span_to_string(&call.span),
             )));
         }
+        // early return if no generics in this function call
+        if fdef.generics.is_empty() {
+            return Ok(fdef.returns.first().unwrap().clone());
+        }
 
         // XXX(unimpl) generic inference in fn calls not yet supported
         use ast::ConstantGenericValue::*;
-        if (call.explicit_generics.is_some()
-            && call
-                .explicit_generics
-                .as_ref()
-                .unwrap()
-                .values
-                .iter()
-                .any(|eg| matches!(eg, Underscore(_))))
-            || (call.explicit_generics.is_none() && !fdef.generics.is_empty())
+        if call
+            .explicit_generics
+            .as_ref()
+            .map(|eg| eg.values.iter().any(|eg| matches!(eg, Underscore(_))))
+            .unwrap_or_else(|| !fdef.generics.is_empty())
         {
+            // step 1: build mutable map from generic identifier to expression, including any
+            // explicit values currently defined
+
+            // step 2: for each function argument, and optionally the return value, unify type
+            // possibly updating the mutable map from step 1
+
+            // step 3: if rty is Some, unify return type with function return type, possibly
+            // updating the mutable map from step 1
+
+            // step 4: if we've determined the explicit generic values, write them back to the call
+            // otherwise return an error
+
             return Err(ZVisitorError(format!(
                 "ZStatementWalker: generic inference in fn calls still wip:\n{}",
                 span_to_string(&call.span),
@@ -1745,13 +1758,18 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         ret_rewriter.visit_type(&mut ret_ty).map(|_| ret_ty)
     }
 
-    fn get_postfix_ty(&self, pf: &mut ast::PostfixExpression<'ast>) -> ZResult<ast::Type<'ast>> {
+    fn get_postfix_ty(
+        &self,
+        pf: &mut ast::PostfixExpression<'ast>,
+        rty: Option<&ast::Type<'ast>>,
+    ) -> ZResult<ast::Type<'ast>> {
         use ast::Access::*;
         assert!(!pf.accesses.is_empty());
 
         // XXX(assume) no functions in arrays or structs
         // handle first access, which is special because only this one could be a Call()
         let (id, acc) = (&pf.id, &mut pf.accesses);
+        let alen = acc.len();
         let (pf_id_ty, acc_offset) = if let Call(ca) = acc.first_mut().unwrap() {
             // look up function type
             // XXX(todo) handle EMBED/* functions
@@ -1769,7 +1787,12 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                         &id.value,
                     )))
                 } else {
-                    Ok((self.unify_fdef_call(fdef, ca)?, 1))
+                    let rty = if alen == 1 {
+                        rty
+                    } else {
+                        None
+                    };
+                    Ok((self.unify_fdef_call(fdef, ca, rty)?, 1))
                 }
             })?
         } else {
@@ -1786,7 +1809,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         ty: ast::Type<'ast>,
         pf: &mut ast::PostfixExpression<'ast>,
     ) -> ZVisitorResult {
-        let acc_ty = self.get_postfix_ty(pf)?;
+        let acc_ty = self.get_postfix_ty(pf, Some(&ty))?;
         eq_type(&ty, &acc_ty)
     }
 
