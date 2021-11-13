@@ -1676,11 +1676,31 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         }
     }
 
+    fn fdef_gen_arg(
+        &self,
+        pty: &ast::Type<'ast>,
+        exp: &ast::Expression<'ast>,
+        egv: &mut Vec<ast::ConstantGenericValue<'ast>>,
+        gid_map: &HashMap<&str, usize>,
+    ) -> ZVisitorResult {
+        Ok(())
+    }
+
+    fn fdef_gen_ret(
+        &self,
+        dty: &ast::Type<'ast>,
+        rty: &ast::Type<'ast>,
+        egv: &mut Vec<ast::ConstantGenericValue<'ast>>,
+        gid_map: &HashMap<&str, usize>,
+    ) -> ZVisitorResult {
+        Ok(())
+    }
+
     fn unify_fdef_call(
         &self,
         fdef: &ast::FunctionDefinition<'ast>,
         call: &mut ast::CallAccess<'ast>,
-        _rty: Option<&ast::Type<'ast>>,
+        rty: Option<&ast::Type<'ast>>,
     ) -> ZResult<ast::Type<'ast>> {
         if call.arguments.expressions.len() != fdef.parameters.len() {
             return Err(ZVisitorError(format!(
@@ -1711,22 +1731,39 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             .map(|eg| eg.values.iter().any(|eg| matches!(eg, Underscore(_))))
             .unwrap_or_else(|| !fdef.generics.is_empty())
         {
-            // step 1: build mutable map from generic identifier to expression, including any
-            // explicit values currently defined
+            // step 1: construct mutable vector of constant generic values, plus a Name->Posn map
+            let (gen, par, ret) = (&fdef.generics, &fdef.parameters, &fdef.returns);
+            let gid_map = gen.iter().enumerate().map(|(i,v)| (v.value.as_ref(),i)).collect::<HashMap<&str,usize>>();
+            let egv = {
+                let (sp, eg) = (&call.span, &mut call.explicit_generics);
+                &mut eg.get_or_insert_with(|| ast::ExplicitGenerics {
+                    values: vec![Underscore( ast::Underscore { span: sp.clone() } ); gen.len()],
+                    span: sp.clone(),
+                }).values
+            };
+            assert_eq!(egv.len(), gen.len());
 
-            // step 2: for each function argument, and optionally the return value, unify type
-            // possibly updating the mutable map from step 1
+            // step 2: for each function argument unify type and update cgvs
+            for (exp, pty) in call.arguments.expressions.iter().zip(par.iter().map(|p| &p.ty)) {
+                self.fdef_gen_arg(pty, exp, egv, &gid_map)?;
+            }
 
-            // step 3: if rty is Some, unify return type with function return type, possibly
-            // updating the mutable map from step 1
+            // step 3: optionally unify return type and update cgvs
+            if let Some(rty) = rty {
+                // XXX(unimpl) multi-return statements not supported
+                self.fdef_gen_ret(&ret[0], rty, egv, &gid_map)?;
+            }
 
             // step 4: if we've determined the explicit generic values, write them back to the call
             // otherwise return an error
-
-            return Err(ZVisitorError(format!(
-                "ZStatementWalker: generic inference in fn calls still wip:\n{}",
-                span_to_string(&call.span),
-            )));
+            if egv.iter().any(|eg| matches!(eg, Underscore(_))) {
+                return Err(ZVisitorError(format!(
+                    "ZStatementWalker: failed to infer generics in fn call:\n{}\n\n{:?}\n{:?}",
+                    span_to_string(&call.span),
+                    egv,
+                    gid_map,
+                )));
+            }
         }
 
         // rewrite return type and return it
