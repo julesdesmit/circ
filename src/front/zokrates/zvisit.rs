@@ -1,6 +1,7 @@
 //! AST Walker for zokrates_pest_ast
 #![allow(missing_docs)]
 
+use log::debug;
 use std::collections::HashMap;
 use zokrates_pest_ast as ast;
 
@@ -1676,23 +1677,85 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         }
     }
 
-    fn fdef_gen_arg(
+    fn fdef_gen_ty(
         &self,
-        pty: &ast::Type<'ast>,
-        exp: &ast::Expression<'ast>,
+        dty: &ast::Type<'ast>,      // declared type (from fn defn)
+        rty: &ast::Type<'ast>,      // required type (from call context)
         egv: &mut Vec<ast::ConstantGenericValue<'ast>>,
         gid_map: &HashMap<&str, usize>,
     ) -> ZVisitorResult {
+        use ast::Type::*;
+        match (dty, rty) {
+            (Basic(dty_b), Basic(rty_b)) => eq_basic_type(dty_b, rty_b)
+                .map_err(|e| ZVisitorError(format!("Inferring generic fn call: {}", e.0))),
+            (Array(dty_a), Array(rty_a)) => self.fdef_gen_ty_array(dty_a, rty_a, egv, gid_map),
+            (Struct(dty_s), Struct(rty_s)) => self.fdef_gen_ty_struct(dty_s, rty_s, egv, gid_map),
+            _ => Err(ZVisitorError(format!(
+                "Inferring generic fn call: type mismatch: expected {:?}, got {:?}",
+                rty,
+                dty,
+            ))),
+        }
+    }
+
+    fn fdef_gen_ty_array(
+        &self,
+        dty: &ast::ArrayType<'ast>,     // declared type (from fn defn)
+        rty: &ast::ArrayType<'ast>,     // required type (from call context)
+        egv: &mut Vec<ast::ConstantGenericValue<'ast>>,
+        gid_map: &HashMap<&str, usize>,
+    ) -> ZVisitorResult {
+        // check dimensions
+        if dty.dimensions.len() != rty.dimensions.len() {
+            return Err(ZVisitorError(format!(
+                "Inferring generic fn call: Array #dimensions mismatch: expected {}, got {}",
+                rty.dimensions.len(),
+                dty.dimensions.len(),
+            )));
+        }
+
+        // unify the type contained in the array
+        use ast::BasicOrStructType as BoST;
+        match (&dty.ty, &rty.ty) {
+            (BoST::Struct(dty_s), BoST::Struct(rty_s)) => self.fdef_gen_ty_struct(dty_s, rty_s, egv, gid_map),
+            (BoST::Basic(dty_b), BoST::Basic(rty_b)) => eq_basic_type(dty_b, rty_b)
+                .map_err(|e| ZVisitorError(format!("Inferring generic fn call: {}", e.0))),
+            _ => Err(ZVisitorError(format!(
+                "Inferring generic fn call: Array type mismatch: expected {:?}, got {:?}",
+                &rty.ty,
+                &dty.ty,
+            ))),
+        }?;
+
+        // unify each dimension expression
+        // XXX(TODO)
+
         Ok(())
     }
 
-    fn fdef_gen_ret(
+    fn fdef_gen_ty_struct(
         &self,
-        dty: &ast::Type<'ast>,
-        rty: &ast::Type<'ast>,
+        dty: &ast::StructType<'ast>,    // declared type (from fn defn)
+        rty: &ast::StructType<'ast>,    // required type (from call context)
         egv: &mut Vec<ast::ConstantGenericValue<'ast>>,
         gid_map: &HashMap<&str, usize>,
     ) -> ZVisitorResult {
+        // make sure structs exist
+        let dty_defn = self.get_struct(&dty.id.value)?;
+        let rty_defn = self.get_struct(&rty.id.value)?;
+        // XXX(unimpl) rty must be monomorphized
+        if rty.explicit_generics.is_some() || !rty_defn.generics.is_empty() {
+            return Err(ZVisitorError(format!(
+                "Inferring generic in fn call: required type was not monomorphized: {:?}",
+                rty,
+            )));
+        }
+
+        // TODO: handle monomorphized rty vs non-monomorphized dty here
+        // can we make this easier by storing info at monomorphization time?
+
+        // once we have done the above, is there anything left to do??? (I don't think so...)
+
         Ok(())
     }
 
@@ -1744,14 +1807,21 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             assert_eq!(egv.len(), gen.len());
 
             // step 2: for each function argument unify type and update cgvs
-            for (exp, pty) in call.arguments.expressions.iter().zip(par.iter().map(|p| &p.ty)) {
-                self.fdef_gen_arg(pty, exp, egv, &gid_map)?;
+            let mut zty = ZExpressionTyper::new(self);
+            for (exp, pty) in call.arguments.expressions.iter_mut().zip(par.iter().map(|p| &p.ty)) {
+                zty.visit_expression(exp)?;
+                let aty = zty.take();
+                if let Some(aty) = aty {
+                    self.fdef_gen_ty(pty, &aty, egv, &gid_map)?;
+                } else {
+                    debug!("Could not type expression {:?} while inferring generic fn call", exp);
+                }
             }
 
             // step 3: optionally unify return type and update cgvs
             if let Some(rty) = rty {
                 // XXX(unimpl) multi-return statements not supported
-                self.fdef_gen_ret(&ret[0], rty, egv, &gid_map)?;
+                self.fdef_gen_ty(&ret[0], rty, egv, &gid_map)?;
             }
 
             // step 4: if we've determined the explicit generic values, write them back to the call
