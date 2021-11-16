@@ -1287,6 +1287,8 @@ fn eq_struct_type<'ast>(ty: &ast::StructType<'ast>, ty2: &ast::StructType<'ast>)
             &ty.id.value, &ty2.id.value,
         )))
     } else {
+        // XXX(rsw) need to check that ExplicitGenerics match
+        // will this require a ref to ZStatementWalker for const def'ns etc?
         Ok(())
     }
 }
@@ -1727,10 +1729,11 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             ))),
         }?;
 
-        // unify each dimension expression
-        // XXX(TODO)
-
-        Ok(())
+        // unify the dimensions
+        dty.dimensions
+            .iter()
+            .zip(rty.dimensions.iter())
+            .try_for_each(|(dexp, rexp)| self.fdef_gen_ty_expr(dexp, rexp, egv, gid_map))
     }
 
     fn fdef_gen_ty_struct(
@@ -1740,22 +1743,70 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         egv: &mut Vec<ast::ConstantGenericValue<'ast>>,
         gid_map: &HashMap<&str, usize>,
     ) -> ZVisitorResult {
-        // make sure structs exist
-        let dty_defn = self.get_struct(&dty.id.value)?;
-        let rty_defn = self.get_struct(&rty.id.value)?;
-        // XXX(unimpl) rty must be monomorphized
-        if rty.explicit_generics.is_some() || !rty_defn.generics.is_empty() {
+        if &dty.id.value != &rty.id.value {
             return Err(ZVisitorError(format!(
-                "Inferring generic in fn call: required type was not monomorphized: {:?}",
-                rty,
+                "Inferring generic in fn call: wanted struct {}, found struct {}",
+                &rty.id.value,
+                &dty.id.value,
+            )));
+        }
+        // make sure struct exists and short-circuit if it's not generic
+        if self.get_struct(&dty.id.value)?.generics.is_empty() {
+            return if dty.explicit_generics.is_some() {
+                Err(ZVisitorError(format!(
+                    "Inferring generic in fn call: got explicit generics for non-generic struct type {}:\n{}",
+                    &dty.id.value,
+                    span_to_string(&dty.span),
+                )))
+            } else {
+                Ok(())
+            };
+        }
+
+        // declared type in fn defn must provide explicit generics
+        use ast::ConstantGenericValue::*;
+        if dty.explicit_generics
+            .as_ref()
+            .map(|eg| eg.values.iter().any(|eg| matches!(eg, Underscore(_))))
+            .unwrap_or(true)
+        {
+            return Err(ZVisitorError(format!(
+                "Cannot infer generic values for struct {}\nGeneric structs in fn defns must have explicit generics (possibly in terms of fn generics)",
+                &dty.id.value,
             )));
         }
 
-        // TODO: handle monomorphized rty vs non-monomorphized dty here
-        // can we make this easier by storing info at monomorphization time?
+        // invariant: rty is LHS, therefore must have explicit generics
+        let dty_egvs = &dty.explicit_generics.as_ref().unwrap().values;
+        let rty_egvs = &rty.explicit_generics.as_ref().unwrap().values;
+        assert_eq!(dty_egvs.len(), rty_egvs.len());
 
-        // once we have done the above, is there anything left to do??? (I don't think so...)
+        // unify generic args to structs
+        dty_egvs
+            .iter()
+            .zip(rty_egvs.iter())
+            .try_for_each(|(dv, rv)| self.fdef_gen_ty_cgv(dv, rv, egv, gid_map))
+    }
 
+    fn fdef_gen_ty_cgv(
+        &self,
+        dv: &ast::ConstantGenericValue<'ast>,   // declared type (from fn defn)
+        rv: &ast::ConstantGenericValue<'ast>,   // required type (from call context)
+        egv: &mut Vec<ast::ConstantGenericValue<'ast>>,
+        gid_map: &HashMap<&str, usize>,
+    ) -> ZVisitorResult {
+        // TODO
+        Ok(())
+    }
+
+    fn fdef_gen_ty_expr(
+        &self,
+        dexp: &ast::Expression<'ast>,       // declared type (from fn defn)
+        rexp: &ast::Expression<'ast>,       // required type (from call context)
+        egv: &mut Vec<ast::ConstantGenericValue<'ast>>,
+        gid_map: &HashMap<&str, usize>,
+    ) -> ZVisitorResult {
+        // TODO
         Ok(())
     }
 
@@ -1772,21 +1823,34 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                 span_to_string(&call.span),
             )));
         }
-        if call.explicit_generics.is_some()
-            && call.explicit_generics.as_ref().unwrap().values.len() != fdef.generics.len()
-        {
+        // early return if no generics in this function call
+        if fdef.generics.is_empty() {
+            return if call.explicit_generics.is_some() {
+                Err(ZVisitorError(format!(
+                    "ZStatementWalker: got explicit generics for non-generic fn call {}:\n{}",
+                    &fdef.id.value,
+                    span_to_string(&call.span),
+                )))
+            } else {
+                Ok(fdef.returns.first().unwrap().clone())
+            };
+        }
+
+        if call.explicit_generics.is_none() {
+            return Err(ZVisitorError(format!(
+                "ZStatementWalker: no explicit generics found monomorphizing call to {}",
+                &fdef.id.value,
+            )));
+        }
+
+        if call.explicit_generics.as_ref().unwrap().values.len() != fdef.generics.len() {
             return Err(ZVisitorError(format!(
                 "ZStatementWalker: wrong number of generic args to fn {}:\n{}",
                 &fdef.id.value,
                 span_to_string(&call.span),
             )));
         }
-        // early return if no generics in this function call
-        if fdef.generics.is_empty() {
-            return Ok(fdef.returns.first().unwrap().clone());
-        }
 
-        // XXX(unimpl) generic inference in fn calls not yet supported
         use ast::ConstantGenericValue::*;
         if call
             .explicit_generics
@@ -1837,16 +1901,16 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         }
 
         // rewrite return type and return it
-        // XXX(perf) do this without so much cloning?
+        // XXX(perf) do this without so much cloning? probably changes ZExpressionRewriter
         let egv = call
             .explicit_generics
             .as_ref()
             .map(|eg| {
                 {
-                    eg.values.clone().into_iter().map(|cgv| match cgv {
+                    eg.values.iter().map(|cgv| match cgv {
                         Underscore(_) => unreachable!(),
-                        Value(l) => ast::Expression::Literal(l),
-                        Identifier(i) => ast::Expression::Identifier(i),
+                        Value(l) => ast::Expression::Literal(l.clone()),
+                        Identifier(i) => ast::Expression::Identifier(i.clone()),
                     })
                 }
                 .collect::<Vec<_>>()
@@ -1854,9 +1918,8 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             .unwrap_or_default();
         let gvmap = fdef
             .generics
-            .clone()
-            .into_iter()
-            .map(|ie| ie.value)
+            .iter()
+            .map(|ie| ie.value.clone())
             .zip(egv.into_iter())
             .collect::<HashMap<String, ast::Expression<'ast>>>();
 
@@ -1968,37 +2031,20 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             )));
         };
 
-        let (mut sm_types, st_name) = self.get_struct(&st.id.value).and_then(|sdef| {
-            if sdef.id.value.starts_with(&is.ty.value) {
-                let st_name = if &is.ty.value != &sdef.id.value {
-                    // rewrite AST to monomorphized version
-                    std::mem::replace(&mut is.ty.value, sdef.id.value.clone())
-                } else {
-                    sdef.id.value.clone()
-                };
-                let sm_types = sdef
-                    .fields
-                    .iter()
-                    .map(|sf| (sf.id.value.clone(), sf.ty.clone()))
-                    .collect::<HashMap<String, ast::Type<'ast>>>();
-                Ok((sm_types, st_name))
-            } else {
-                Err(ZVisitorError(format!(
-                    "ZStatementWalker: inline struct wanted struct type {} but declared {}:\n{}",
-                    &st.id.value,
-                    &is.ty.value,
-                    span_to_string(&is.span),
-                )))
-            }
-        })?;
+        let mut sm_types = self.monomorphize_struct(&st)?
+            .fields
+            .into_iter()
+            .map(|sf| (sf.id.value, sf.ty))
+            .collect::<HashMap<String, ast::Type<'ast>>>();
 
+        // unify each InlineStructExpression member with field def from struct def'n
         is.members.iter_mut().try_for_each(|ism| {
             sm_types
                 .remove(ism.id.value.as_str())
                 .ok_or_else(|| {
                     ZVisitorError(format!(
                         "ZStatementWalker: struct {} has no member {}, or duplicate member in expression",
-                        &st_name, &ism.id.value,
+                        &st.id.value, &ism.id.value,
                     ))
                 })
                 .and_then(|sm_ty| self.unify_expression(sm_ty, &mut ism.expression))
@@ -2008,7 +2054,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         if !sm_types.is_empty() {
             Err(ZVisitorError(format!(
                 "ZStatementWalker: struct {} inline decl missing members {:?}\n",
-                &st_name,
+                &st.id.value,
                 sm_types.keys().collect::<Vec<_>>()
             )))
         } else {
@@ -2364,17 +2410,8 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                 Member(macc) => {
                     // XXX(unimpl) LHS of definitions must make generics explicit
                     if let Type::Struct(sty) = ty {
-                        let sdef = self.get_struct(&sty.id.value)
-                            .and_then(|sdef| {
-                                if !sdef.generics.is_empty() {
-                                    Err(ZVisitorError(format!("ZStatementWalker: encountered non-monomorphized struct type {}", &sty.id.value)))
-                                } else {
-                                    Ok(sdef)
-                                }
-                            })?;
-
-                        // asdf
-                        sdef.fields
+                        self.monomorphize_struct(&sty)?
+                            .fields
                             .iter()
                             .find(|f| &f.id.value == &macc.id.value)
                             .ok_or_else(|| {
@@ -2494,26 +2531,73 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         self.vars.pop();
     }
 
-    // XXX(q) instead monomorphize by making sure that ExplicitGenerics are attached to Type???
-    fn monomorphize_struct(&mut self, sty: &mut ast::StructType<'ast>) -> ZResult<ast::Type<'ast>> {
+    fn monomorphize_struct(&self, sty: &ast::StructType<'ast>) -> ZResult<ast::StructDefinition<'ast>> {
+        let mut sdef = self.get_struct(&sty.id.value)?.clone();
+        // short circuit for non-generic structs
+        if sdef.generics.is_empty() {
+            return if sty.explicit_generics.is_some() {
+                Err(ZVisitorError(format!(
+                    "ZStatementWalker: got explicit generics for non-generic struct type {}:\n{}",
+                    &sty.id.value,
+                    span_to_string(&sty.span),
+                )))
+            } else {
+                Ok(sdef)
+            };
+        }
+
+        if sty.explicit_generics.is_none() {
+            return Err(ZVisitorError(format!(
+                "ZStatementWalker: no explicit generics found monomorphizing struct {}",
+                &sty.id.value,
+
+            )));
+        }
+
+        // XXX(q) rewrite id field of sdef?
+        let generics = std::mem::take(&mut sdef.generics);
+        let gen_values = &sty.explicit_generics.as_ref().unwrap().values;
+        assert_eq!(generics.len(), gen_values.len());
+
         use ast::ConstantGenericValue::*;
+        let gvmap = generics
+            .into_iter()
+            .map(|ie| ie.value)
+            .zip(gen_values.iter().map(|cgv| match cgv {
+                Underscore(_) => unreachable!(),
+                Value(l) => ast::Expression::Literal(l.clone()),
+                Identifier(i) => ast::Expression::Identifier(i.clone()),
+            }))
+            .collect::<HashMap<String, ast::Expression<'ast>>>();
+
+        // rewrite struct definition
+        let mut sf_rewriter = ZExpressionRewriter { gvmap };
+        sdef.fields
+            .iter_mut()
+            .try_for_each(|f| sf_rewriter.visit_struct_field(f))?;
+
+        Ok(sdef)
+    }
+
+    fn monomorphic_struct(&self, sty: &mut ast::StructType<'ast>) -> ZResult<ast::Type<'ast>> {
+        use ast::ConstantGenericValue as CGV;
 
         // get the struct definition and return early if we don't have to handle generics
         let sdef = self.get_struct(&sty.id.value)?;
         if sdef.generics.is_empty() {
-            if sty.explicit_generics.is_some() {
-                return Err(ZVisitorError(format!(
+            return if sty.explicit_generics.is_some() {
+                Err(ZVisitorError(format!(
                     "ZStatementWalker: got explicit generics for non-generic struct type {}:\n{}",
                     &sty.id.value,
                     span_to_string(&sty.span),
-                )));
+                )))
             } else {
-                return Ok(ast::Type::Struct(sty.clone()));
-            }
+                Ok(ast::Type::Struct(sty.clone()))
+            };
         }
 
-        // set up mapping from generic names to values
-        let mut gen_values = sty
+        // check explicit generics
+        let mut eg = sty
             .explicit_generics
             .take()
             .ok_or_else(|| {
@@ -2530,7 +2614,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                         &sty.id.value,
                         span_to_string(&sty.span),
                     )))
-                } else if eg.values.iter().any(|v| matches!(v, Underscore(_))) {
+                } else if eg.values.iter().any(|v| matches!(v, CGV::Underscore(_))) {
                     Err(ZVisitorError(format!(
                         "ZStatementWalker: must specify all generic arguments for LHS struct {}:\n{}",
                         &sty.id.value,
@@ -2539,7 +2623,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                 } else {
                     // make sure identifiers are actually defined!
                     eg.values.iter().try_for_each(|v|
-                        if let Identifier(ie) = v {
+                        if let CGV::Identifier(ie) = v {
                             if self.const_defined(&ie.value) || self.generic_defined(&ie.value) {
                                 Ok(())
                             } else {
@@ -2555,44 +2639,15 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                         }
                     ).map(|_| eg)
                 }
-            })?.values;
+            })?;
+
+        // rewrite untyped literals
         let mut rewriter = ZConstLiteralRewriter::new(None);
-        gen_values
-            .iter_mut()
+        eg.values.iter_mut()
             .try_for_each(|cgv| rewriter.visit_constant_generic_value(cgv))?;
-        sty.id.value = format!("{}*{:?}", &sdef.id.value, &gen_values);
 
-        // rewrite struct definition if necessary
-        if !self.zgen.struct_defined(&sty.id.value) {
-            let generics = sdef.generics.clone();
-            let mut sdef = ast::StructDefinition {
-                id: ast::IdentifierExpression {
-                    value: sty.id.value.clone(),
-                    span: sdef.id.span.clone(),
-                },
-                generics: Vec::new(),
-                fields: sdef.fields.clone(),
-                span: sdef.span.clone(),
-            };
-            let gvmap = generics
-                .into_iter()
-                .map(|ie| ie.value)
-                .zip(gen_values.into_iter().map(|cgv| match cgv {
-                    Underscore(_) => unreachable!(),
-                    Value(l) => ast::Expression::Literal(l),
-                    Identifier(i) => ast::Expression::Identifier(i),
-                }))
-                .collect::<HashMap<String, ast::Expression<'ast>>>();
-
-            // rewrite struct definition
-            let mut sf_rewriter = ZExpressionRewriter { gvmap };
-            sdef.fields
-                .iter_mut()
-                .try_for_each(|f| sf_rewriter.visit_struct_field(f))?;
-
-            // save it
-            self.zgen.insert_struct(&sty.id.value, sdef);
-        }
+        // put gen_values back
+        sty.explicit_generics = Some(eg);
 
         Ok(ast::Type::Struct(sty.clone()))
     }
@@ -2658,6 +2713,8 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
         &mut self,
         def: &mut ast::DefinitionStatement<'ast>,
     ) -> ZVisitorResult {
+        // XXX(unimpl) no L<-R generic inference right now.
+        // REVISIT: if LHS is typed identifier and RHS has complete type, infer L<-R
         def.lhs
             .iter_mut()
             .try_for_each(|l| self.visit_typed_identifier_or_assignee(l))?;
@@ -2714,7 +2771,7 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
             TypedIdentifier(ti) => {
                 ZConstLiteralRewriter::new(None).visit_type(&mut ti.ty)?;
                 let ty = if let ast::Type::Struct(sty) = &mut ti.ty {
-                    self.monomorphize_struct(sty)?
+                    self.monomorphic_struct(sty)?
                 } else {
                     ti.ty.clone()
                 };

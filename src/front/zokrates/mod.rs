@@ -1162,6 +1162,7 @@ impl<'ast> ZGen<'ast> {
         self.functions.get(&f_path).and_then(|m| m.get(&f_name))
     }
 
+    /*
     fn struct_defined(&self, struct_id: &str) -> bool {
         let (s_path, s_name) = self.deref_import(struct_id);
         self.structs
@@ -1169,6 +1170,7 @@ impl<'ast> ZGen<'ast> {
             .map(|m| m.contains_key(&s_name))
             .unwrap_or(false)
     }
+    */
 
     /*
     fn get_struct_mut(&mut self, struct_id: &str) -> Option<&mut ast::StructDefinition<'ast>> {
