@@ -5,12 +5,18 @@ use log::debug;
 use std::collections::HashMap;
 use zokrates_pest_ast as ast;
 
-use super::term::Ty;
+use super::term::{const_int, const_int_ref, Ty};
 use super::ZGen;
 
 pub struct ZVisitorError(pub String);
 pub type ZResult<T> = Result<T, ZVisitorError>;
 pub type ZVisitorResult = ZResult<()>;
+
+impl From<String> for ZVisitorError {
+    fn from(f: String) -> Self {
+        Self(f)
+    }
+}
 
 pub trait ZVisitorMut<'ast>: Sized {
     fn visit_file(&mut self, file: &mut ast::File<'ast>) -> ZVisitorResult {
@@ -1550,7 +1556,7 @@ impl<'ast, 'ret, 'wlk> ZVisitorMut<'ast> for ZExpressionTyper<'ast, 'ret, 'wlk> 
         // XXX(unimpl) does not check array lengths
         let (sp, ex) = (&iae.span, &mut iae.expressions);
         let mut acc_ty = None;
-        ex.iter_mut().try_for_each(|soe| {
+        ex.iter_mut().try_for_each::<_, ZVisitorResult>(|soe| {
             self.visit_spread_or_expression(soe)?;
             if let Some(ty) = self.take() {
                 let ty = if matches!(soe, ast::SpreadOrExpression::Expression(_)) {
@@ -1795,8 +1801,137 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         egv: &mut Vec<ast::ConstantGenericValue<'ast>>,
         gid_map: &HashMap<&str, usize>,
     ) -> ZVisitorResult {
-        // TODO
-        Ok(())
+        use ast::ConstantGenericValue::*;
+        match (dv, rv) {
+            (Identifier(did), _) => {
+                if let Some(&doff) = gid_map.get(did.value.as_str()) {
+                    if matches!(&egv[doff], Underscore(_)) {
+                        egv[doff] = rv.clone();
+                        Ok(())
+                    } else {
+                        self.fdef_gen_cgv_check(&egv[doff], rv)
+                    }
+                } else {
+                    self.fdef_gen_cgv_check(dv, rv)
+                }
+            }
+            (dv, rv) => self.fdef_gen_cgv_check(dv, rv),
+        }
+    }
+
+    fn fdef_gen_cgv_check(
+        &self,
+        dv: &ast::ConstantGenericValue<'ast>,
+        rv: &ast::ConstantGenericValue<'ast>,
+    ) -> ZVisitorResult {
+        use ast::ConstantGenericValue::*;
+        match (dv, rv) {
+            (Underscore(_), _) | (_, Underscore(_)) => unreachable!(),
+            (Value(dle), Value(rle)) => self.fdef_gen_le_le(dle, rle),
+            (Identifier(did), Identifier(rid)) => self.fdef_gen_id_id(did, rid),
+            (Identifier(did), Value(rle)) => self.fdef_gen_id_le(did, rle),
+            (Value(dle), Identifier(rid)) => self.fdef_gen_id_le(rid, dle),
+        }
+    }
+
+    fn fdef_gen_id_id(
+        &self,
+        did: &ast::IdentifierExpression<'ast>,
+        rid: &ast::IdentifierExpression<'ast>,
+    ) -> ZVisitorResult {
+        // did must be either generic id in enclosing scope or const
+        if self.generic_defined(did.value.as_str()) {
+            if &did.value == &rid.value {
+                Ok(())
+            } else {
+                Err(ZVisitorError(format!(
+                    "Inconsistent generic args detected: wanted {}, got {}",
+                    &rid.value,
+                    &did.value,
+                )))
+            }
+        } else if self.generic_defined(rid.value.as_str()) {
+            // did is a const, but rid is a generic arg
+            Err(ZVisitorError(format!(
+                "Generic identifier {} is not identically const identifier {}",
+                &did.value,
+                &rid.value,
+            )))
+        } else {
+            match (self.zgen.const_lookup_(did.value.as_str()),
+                   self.zgen.const_lookup_(rid.value.as_str())) {
+                (None, _) => Err(ZVisitorError(format!(
+                    "Constant {} undefined when inferring generics",
+                    &did.value,
+                ))),
+                (_, None) => Err(ZVisitorError(format!(
+                    "Constant {} undefined when inferring generics",
+                    &rid.value,
+                ))),
+                (Some(dc), Some(rc)) => {
+                    let dval = const_int_ref(dc)?;
+                    let rval = const_int_ref(rc)?;
+                    if dval != rval {
+                        Err(ZVisitorError(format!(
+                            "Mismatch in struct generic: expected {}, got {}",
+                            rval,
+                            dval,
+                        )))
+                    } else {
+                        Ok(())
+                    }
+                }
+            }
+        }
+    }
+
+    fn fdef_gen_id_le(
+        &self,
+        id: &ast::IdentifierExpression<'ast>,
+        le: &ast::LiteralExpression<'ast>,
+    ) -> ZVisitorResult {
+        if self.generic_defined(id.value.as_str()) {
+            Err(ZVisitorError(format!(
+                "Inconsistent generic args detected: wanted {:?}, got local generic identifier {}",
+                le,
+                &id.value,
+            )))
+        } else if let Some(dc) = self.zgen.const_lookup_(id.value.as_str()) {
+            let dval = const_int_ref(dc)?;
+            let rval = const_int(self.zgen.literal_(le))?;
+            if dval != rval {
+                Err(ZVisitorError(format!(
+                    "Mismatch in struct generic: expected {}, got {}",
+                    rval,
+                    dval,
+                )))
+            } else {
+                Ok(())
+            }
+        } else {
+            Err(ZVisitorError(format!(
+                "Constant {} undefined when inferring generics",
+                &id.value,
+            )))
+        }
+    }
+
+    fn fdef_gen_le_le(
+        &self,
+        dle: &ast::LiteralExpression<'ast>,
+        rle: &ast::LiteralExpression<'ast>,
+    ) -> ZVisitorResult {
+        let dval = const_int(self.zgen.literal_(dle))?;
+        let rval = const_int(self.zgen.literal_(rle))?;
+        if dval != rval {
+            Err(ZVisitorError(format!(
+                "Mismatch in struct generic: expected {}, got {}",
+                rval,
+                dval,
+            )))
+        } else {
+            Ok(())
+        }
     }
 
     fn fdef_gen_ty_expr(
@@ -2503,7 +2638,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                 "ZStatementWalker: attempted to shadow generic {}",
                 nm,
             )))
-        } else if self.zgen.const_lookup_(nm).is_some() {
+        } else if self.const_defined(nm) {
             Err(ZVisitorError(format!(
                 "ZStatementWalker: attempted to shadow const {}",
                 nm,
