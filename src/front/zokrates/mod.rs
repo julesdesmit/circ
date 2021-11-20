@@ -796,6 +796,7 @@ impl<'ast> ZGen<'ast> {
             .unwrap()
     }
 
+    // XXX(TODO) make this return a Result<> rather than blowing up!
     fn const_expr_(&self, e: &ast::Expression<'ast>) -> T {
         match e {
             ast::Expression::Binary(b) => {

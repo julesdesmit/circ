@@ -1934,6 +1934,31 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         }
     }
 
+    fn fdef_gen_expr_check(
+        &self,
+        dexp: &ast::Expression<'ast>,
+        rexp: &ast::Expression<'ast>,
+    ) -> ZVisitorResult {
+        match (const_int(self.zgen.const_expr_(dexp)), const_int(self.zgen.const_expr_(rexp))) {
+            (Ok(dci), Ok(rci)) => {
+                if dci == rci {
+                    Ok(())
+                } else {
+                    Err(ZVisitorError(format!(
+                        "Mismatch in struct generic: expected {}, got {}",
+                        rci,
+                        dci,
+                    )))
+                }
+            }
+            _ => Err(ZVisitorError(format!(
+                "Inferring fn call generics: unsupported array dimension expr {:?}, expected {:?}",
+                dexp,
+                rexp,
+            )))
+        }
+    }
+
     fn fdef_gen_ty_expr(
         &self,
         dexp: &ast::Expression<'ast>,       // declared type (from fn defn)
@@ -1941,8 +1966,61 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         egv: &mut Vec<ast::ConstantGenericValue<'ast>>,
         gid_map: &HashMap<&str, usize>,
     ) -> ZVisitorResult {
-        // TODO
-        Ok(())
+        use ast::Expression::*;
+        match (dexp, rexp) {
+            (Binary(dbin), Binary(rbin)) if dbin.op == rbin.op => {
+                // XXX(unimpl) improve support for complex const expression inference?
+                self.fdef_gen_ty_expr(dbin.left.as_ref(), rbin.left.as_ref(), egv, gid_map)?;
+                self.fdef_gen_ty_expr(dbin.right.as_ref(), rbin.right.as_ref(), egv, gid_map)
+            }
+            (Identifier(did), Identifier(rid)) => {
+                Ok(())
+            }
+            (Identifier(did), Literal(rle)) => {
+                Ok(())
+            }
+            (Identifier(did), _) => {
+                if let Some(&doff) = gid_map.get(did.value.as_str()) {
+                    if matches!(&egv[doff], ast::ConstantGenericValue::Underscore(_)) {
+                        match const_int(self.zgen.const_expr_(rexp)) {
+                            Ok(rval) => match rval.to_u32() {
+                                Some(rval) => {
+                                    let span = rexp.span().clone();
+                                    let hne = ast::HexNumberExpression::U32(
+                                        ast::U32NumberExpression {
+                                            value: format!("0x{:08x}", rval),
+                                            span: span.clone(),
+                                        }
+                                    );
+                                    let hle = ast::HexLiteralExpression {
+                                        value: hne,
+                                        span: span.clone(),
+                                    };
+                                    egv[doff] = ast::ConstantGenericValue::Value(
+                                        ast::LiteralExpression::HexLiteral(hle)
+                                    );
+                                    Ok(())
+                                }
+                                None => Err(ZVisitorError(format!(
+                                    "Inferring fn call generics: got generic value {} out of u32 range",
+                                    rval,
+                                ))),
+                            }
+                            Err(e) => Err(ZVisitorError(format!(
+                                "Inferring fn call generics: cannot constify expression {:?}: {}",
+                                rexp,
+                                e
+                            ))),
+                        }
+                    } else {
+                        self.fdef_gen_expr_check(dexp, rexp)
+                    }
+                } else {
+                    self.fdef_gen_expr_check(dexp, rexp)
+                }
+            }
+            _ => self.fdef_gen_expr_check(dexp, rexp),
+        }
     }
 
     fn unify_fdef_call(
