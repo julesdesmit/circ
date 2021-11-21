@@ -2068,14 +2068,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             };
         }
 
-        if call.explicit_generics.is_none() {
-            return Err(ZVisitorError(format!(
-                "ZStatementWalker: no explicit generics found monomorphizing call to {}",
-                &fdef.id.value,
-            )));
-        }
-
-        if call.explicit_generics.as_ref().unwrap().values.len() != fdef.generics.len() {
+        if call.explicit_generics.as_ref().map(|eg| eg.values.len() != fdef.generics.len()).unwrap_or(false) {
             return Err(ZVisitorError(format!(
                 "ZStatementWalker: wrong number of generic args to fn {}:\n{}",
                 &fdef.id.value,
