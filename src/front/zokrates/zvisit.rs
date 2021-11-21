@@ -1966,22 +1966,42 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         egv: &mut Vec<ast::ConstantGenericValue<'ast>>,
         gid_map: &HashMap<&str, usize>,
     ) -> ZVisitorResult {
-        use ast::Expression::*;
+        use ast::{Expression::*, ConstantGenericValue as CGV};
         match (dexp, rexp) {
             (Binary(dbin), Binary(rbin)) if dbin.op == rbin.op => {
                 // XXX(unimpl) improve support for complex const expression inference?
                 self.fdef_gen_ty_expr(dbin.left.as_ref(), rbin.left.as_ref(), egv, gid_map)?;
                 self.fdef_gen_ty_expr(dbin.right.as_ref(), rbin.right.as_ref(), egv, gid_map)
             }
-            (Identifier(did), Identifier(rid)) => {
-                Ok(())
-            }
-            (Identifier(did), Literal(rle)) => {
-                Ok(())
+            (Identifier(did), _) if matches!(rexp, Identifier(_) | Literal(_)) => {
+                if let Some(&doff) = gid_map.get(did.value.as_str()) {
+                    if matches!(&egv[doff], CGV::Underscore(_)) {
+                        egv[doff] = match rexp {
+                            Identifier(rid) => CGV::Identifier(rid.clone()),
+                            Literal(rle) => CGV::Value(rle.clone()),
+                            _ => unreachable!(),
+                        };
+                        Ok(())
+                    } else {
+                        match (&egv[doff], rexp) {
+                            (CGV::Identifier(did), Identifier(rid)) => self.fdef_gen_id_id(did, rid),
+                            (CGV::Identifier(did), Literal(rle)) => self.fdef_gen_id_le(did, rle),
+                            (CGV::Value(dle), Identifier(rid)) => self.fdef_gen_id_le(rid, dle),
+                            (CGV::Value(dle), Literal(rle)) => self.fdef_gen_le_le(dle, rle),
+                            _ => unreachable!(),
+                        }
+                    }
+                } else {
+                    match rexp {
+                        Identifier(rid) => self.fdef_gen_id_id(did, rid),
+                        Literal(rle) => self.fdef_gen_id_le(did, rle),
+                        _ => unreachable!(),
+                    }
+                }
             }
             (Identifier(did), _) => {
                 if let Some(&doff) = gid_map.get(did.value.as_str()) {
-                    if matches!(&egv[doff], ast::ConstantGenericValue::Underscore(_)) {
+                    if matches!(&egv[doff], CGV::Underscore(_)) {
                         const_int(self.zgen.const_expr_(rexp)?)
                             .map_err(|e| ZVisitorError(format!(
                                 "Inferring fn call generics: cannot constify expression {:?}: {}",
@@ -2001,7 +2021,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                                         value: hne,
                                         span: span.clone(),
                                     };
-                                    egv[doff] = ast::ConstantGenericValue::Value(
+                                    egv[doff] = CGV::Value(
                                         ast::LiteralExpression::HexLiteral(hle)
                                     );
                                     Ok(())
