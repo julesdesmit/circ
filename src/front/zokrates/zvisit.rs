@@ -1898,7 +1898,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             )))
         } else if let Some(dc) = self.zgen.const_lookup_(id.value.as_str()) {
             let dval = const_int_ref(dc)?;
-            let rval = const_int(self.zgen.literal_(le))?;
+            let rval = const_int(self.zgen.literal_(le)?)?;
             if dval != rval {
                 Err(ZVisitorError(format!(
                     "Mismatch in struct generic: expected {}, got {}",
@@ -1921,8 +1921,8 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         dle: &ast::LiteralExpression<'ast>,
         rle: &ast::LiteralExpression<'ast>,
     ) -> ZVisitorResult {
-        let dval = const_int(self.zgen.literal_(dle))?;
-        let rval = const_int(self.zgen.literal_(rle))?;
+        let dval = const_int(self.zgen.literal_(dle)?)?;
+        let rval = const_int(self.zgen.literal_(rle)?)?;
         if dval != rval {
             Err(ZVisitorError(format!(
                 "Mismatch in struct generic: expected {}, got {}",
@@ -1939,7 +1939,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         dexp: &ast::Expression<'ast>,
         rexp: &ast::Expression<'ast>,
     ) -> ZVisitorResult {
-        match (const_int(self.zgen.const_expr_(dexp)), const_int(self.zgen.const_expr_(rexp))) {
+        match (const_int(self.zgen.const_expr_(dexp)?), const_int(self.zgen.const_expr_(rexp)?)) {
             (Ok(dci), Ok(rci)) => {
                 if dci == rci {
                     Ok(())
@@ -1982,8 +1982,13 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             (Identifier(did), _) => {
                 if let Some(&doff) = gid_map.get(did.value.as_str()) {
                     if matches!(&egv[doff], ast::ConstantGenericValue::Underscore(_)) {
-                        match const_int(self.zgen.const_expr_(rexp)) {
-                            Ok(rval) => match rval.to_u32() {
+                        const_int(self.zgen.const_expr_(rexp)?)
+                            .map_err(|e| ZVisitorError(format!(
+                                "Inferring fn call generics: cannot constify expression {:?}: {}",
+                                rexp,
+                                e
+                            )))
+                            .and_then(|rval| match rval.to_u32() {
                                 Some(rval) => {
                                     let span = rexp.span().clone();
                                     let hne = ast::HexNumberExpression::U32(
@@ -2005,13 +2010,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                                     "Inferring fn call generics: got generic value {} out of u32 range",
                                     rval,
                                 ))),
-                            }
-                            Err(e) => Err(ZVisitorError(format!(
-                                "Inferring fn call generics: cannot constify expression {:?}: {}",
-                                rexp,
-                                e
-                            ))),
-                        }
+                            })
                     } else {
                         self.fdef_gen_expr_check(dexp, rexp)
                     }

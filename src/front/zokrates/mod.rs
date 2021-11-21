@@ -345,49 +345,50 @@ impl<'ast> ZGen<'ast> {
         )
     }
 
-    fn literal_(&self, e: &ast::LiteralExpression<'ast>) -> T {
+    fn literal_(&self, e: &ast::LiteralExpression<'ast>) -> Result<T, String> {
         match e {
             ast::LiteralExpression::DecimalLiteral(d) => {
                 let vstr = &d.value.span.as_str();
                 match &d.suffix {
                     Some(ast::DecimalSuffix::U8(_)) => {
-                        T::Uint(8, bv_lit(u8::from_str_radix(vstr, 10).unwrap(), 8))
+                        Ok(T::Uint(8, bv_lit(u8::from_str_radix(vstr, 10).unwrap(), 8)))
                     }
                     Some(ast::DecimalSuffix::U16(_)) => {
-                        T::Uint(16, bv_lit(u16::from_str_radix(vstr, 10).unwrap(), 16))
+                        Ok(T::Uint(16, bv_lit(u16::from_str_radix(vstr, 10).unwrap(), 16)))
                     }
                     Some(ast::DecimalSuffix::U32(_)) => {
-                        T::Uint(32, bv_lit(u32::from_str_radix(vstr, 10).unwrap(), 32))
+                        Ok(T::Uint(32, bv_lit(u32::from_str_radix(vstr, 10).unwrap(), 32)))
                     }
                     Some(ast::DecimalSuffix::U64(_)) => {
-                        T::Uint(64, bv_lit(u64::from_str_radix(vstr, 10).unwrap(), 64))
+                        Ok(T::Uint(64, bv_lit(u64::from_str_radix(vstr, 10).unwrap(), 64)))
                     }
                     Some(ast::DecimalSuffix::Field(_)) => {
-                        T::Field(pf_lit(Integer::from_str_radix(vstr, 10).unwrap()))
+                        Ok(T::Field(pf_lit(Integer::from_str_radix(vstr, 10).unwrap())))
                     }
                     // XXX(unimpl) need to infer int size from context
-                    _ => self.err("Could not infer literal type. Annotation needed.", &d.span),
+                    _ => Err("Could not infer literal type. Annotation needed.".to_string()),
                 }
             }
             ast::LiteralExpression::BooleanLiteral(b) => {
-                Self::const_bool(bool::from_str(&b.value).unwrap())
+                Ok(Self::const_bool(bool::from_str(&b.value).unwrap()))
             }
             ast::LiteralExpression::HexLiteral(h) => match &h.value {
-                ast::HexNumberExpression::U8(h) => {
-                    T::Uint(8, bv_lit(u8::from_str_radix(&h.value[2..], 16).unwrap(), 8))
-                }
-                ast::HexNumberExpression::U16(h) => T::Uint(
+                ast::HexNumberExpression::U8(h) => Ok(T::Uint(
+                        8,
+                        bv_lit(u8::from_str_radix(&h.value[2..], 16).unwrap(), 8),
+                )),
+                ast::HexNumberExpression::U16(h) => Ok(T::Uint(
                     16,
                     bv_lit(u16::from_str_radix(&h.value[2..], 16).unwrap(), 16),
-                ),
-                ast::HexNumberExpression::U32(h) => T::Uint(
+                )),
+                ast::HexNumberExpression::U32(h) => Ok(T::Uint(
                     32,
                     bv_lit(u32::from_str_radix(&h.value[2..], 16).unwrap(), 32),
-                ),
-                ast::HexNumberExpression::U64(h) => T::Uint(
+                )),
+                ast::HexNumberExpression::U64(h) => Ok(T::Uint(
                     64,
                     bv_lit(u64::from_str_radix(&h.value[2..], 16).unwrap(), 64),
-                ),
+                )),
             },
         }
     }
@@ -470,7 +471,7 @@ impl<'ast> ZGen<'ast> {
                 });
                 T::new_array(avals)
             }
-            ast::Expression::Literal(l) => Ok(self.literal_(l)),
+            ast::Expression::Literal(l) => self.literal_(l),
             ast::Expression::InlineStruct(u) => Ok(T::Struct(
                 u.ty.value.clone(),
                 u.members
@@ -501,12 +502,11 @@ impl<'ast> ZGen<'ast> {
                             g.values
                                 .iter()
                                 .map(|cgv| match cgv {
-                                    ast::ConstantGenericValue::Value(l) => self.literal_(&l),
+                                    ast::ConstantGenericValue::Value(l) => self.unwrap(self.literal_(&l), l.span()),
                                     ast::ConstantGenericValue::Identifier(i) => {
                                         if let Some(v) = self.generic_lookup_(&i.value) {
                                             v.clone()
-                                        } else if let Some(v) = self.const_lookup_(&i.value)
-                                        {
+                                        } else if let Some(v) = self.const_lookup_(&i.value) {
                                             v.clone()
                                         } else {
                                             self.err(
@@ -782,86 +782,81 @@ impl<'ast> ZGen<'ast> {
             .unwrap_or(false)
     }
 
-    fn const_identifier_(&self, i: &ast::IdentifierExpression<'ast>) -> T {
+    fn const_identifier_(&self, i: &ast::IdentifierExpression<'ast>) -> Result<T, String> {
         if let Some(val) = self.const_lookup_(i.value.as_ref()) {
-            val.clone()
+            Ok(val.clone())
         } else {
-            self.err("Undefined const identifier", &i.span)
+            Err(format!("Undefined const identifier {}", &i.value))
         }
     }
 
-    fn const_usize_(&self, e: &ast::Expression<'ast>) -> usize {
-        self.unwrap(const_int(self.const_expr_(e)), e.span())
+    fn const_usize_r_(&self, e: &ast::Expression<'ast>) -> Result<usize, String> {
+        const_int(self.const_expr_(e)?)?
             .to_usize()
-            .unwrap()
+            .ok_or_else(|| "Constant integer outside U32 range".to_string())
     }
 
-    // XXX(TODO) make this return a Result<> rather than blowing up!
-    fn const_expr_(&self, e: &ast::Expression<'ast>) -> T {
+    fn const_usize_(&self, e: &ast::Expression<'ast>) -> usize {
+        self.unwrap(self.const_usize_r_(e), e.span())
+    }
+
+    fn const_expr_(&self, e: &ast::Expression<'ast>) -> Result<T, String> {
         match e {
             ast::Expression::Binary(b) => {
-                let left = self.const_expr_(&b.left);
-                let right = self.const_expr_(&b.right);
+                let left = self.const_expr_(&b.left)?;
+                let right = self.const_expr_(&b.right)?;
                 if left.type_() != right.type_() {
-                    self.err("Type mismatch in const-def binop", &b.span);
+                    return Err("Type mismatch in const-def binop".to_string());
                 }
                 let op = self.bin_op(&b.op);
-                op(left, right).unwrap_or_else(|e| self.err(e, &b.span))
+                op(left, right)
             }
             ast::Expression::Unary(u) => {
-                let arg = self.const_expr_(&u.expression);
+                let arg = self.const_expr_(&u.expression)?;
                 let op = self.unary_op(&u.op);
-                op(arg).unwrap_or_else(|e| self.err(e, &u.span))
+                op(arg)
             }
             ast::Expression::Identifier(i) => self.const_identifier_(i),
             ast::Expression::Literal(l) => self.literal_(l),
             ast::Expression::InlineArray(ia) => {
                 let mut avals = Vec::with_capacity(ia.expressions.len());
-                ia.expressions.iter().for_each(|ee| match ee {
-                    ast::SpreadOrExpression::Expression(eee) => avals.push(self.const_expr_(eee)),
-                    ast::SpreadOrExpression::Spread(s) => avals.append(
-                        &mut self.unwrap(
-                            self.const_expr_(&s.expression).unwrap_array(),
-                            s.expression.span()
-                        )
-                    ),
-                });
-                self.unwrap(T::new_array(avals), e.span())
+                ia.expressions.iter().try_for_each::<_, Result<_, String>>(|ee| match ee {
+                    ast::SpreadOrExpression::Expression(eee) => Ok(avals.push(self.const_expr_(eee)?)),
+                    ast::SpreadOrExpression::Spread(s) => Ok(avals.append(
+                        &mut self.const_expr_(&s.expression)?.unwrap_array()?
+                    )),
+                })?;
+                T::new_array(avals)
             }
             ast::Expression::ArrayInitializer(ai) => {
-                let val = self.const_expr_(&ai.value);
-                let num = self.const_usize_(&ai.count);
-                T::Array(val.type_(), vec![val; num])
+                let val = self.const_expr_(&ai.value)?;
+                let num = self.const_usize_r_(&ai.count)?;
+                Ok(T::Array(val.type_(), vec![val; num]))
             }
             ast::Expression::Postfix(p) => {
                 // make sure all accesses are Select, not Member or Call
                 let mut acc = Vec::with_capacity(p.accesses.len());
                 p.accesses.iter().try_for_each(|a| match a {
-                    ast::Access::Call(c) => Err((
-                            "Function calls not supported in const definitions",
-                            &c.span
-                        )),
-                    ast::Access::Member(m) => Err((
-                            "Struct member accesses not supported in const definitions",
-                            &m.span
-                        )),
+                    ast::Access::Call(_) => Err(
+                            "Function calls not supported in const definitions".to_string(),
+                        ),
+                    ast::Access::Member(_) => Err(
+                            "Struct member accesses not supported in const definitions".to_string(),
+                        ),
                     ast::Access::Select(s) => Ok(acc.push(&s.expression)),
-                })
-                .unwrap_or_else(|(m, s)| self.err(m, s));
-                let arr = self.const_identifier_(&p.id);
-                let res = acc.iter().fold(Ok(arr), |arr, acc| match acc {
-                    ast::RangeOrExpression::Expression(e) => array_select(arr?, self.const_expr_(e)),
+                })?;
+                let arr = self.const_identifier_(&p.id)?;
+                acc.iter().fold(Ok(arr), |arr, acc| match acc {
+                    ast::RangeOrExpression::Expression(e) => array_select(arr?, self.const_expr_(e)?),
                     ast::RangeOrExpression::Range(r) => {
-                        let start = r.from.as_ref().map(|s| self.const_usize_(&s.0));
-                        let end = r.to.as_ref().map(|s| self.const_usize_(&s.0));
+                        let start = r.from.as_ref().map(|s| self.const_usize_r_(&s.0)).transpose()?;
+                        let end = r.to.as_ref().map(|s| self.const_usize_r_(&s.0)).transpose()?;
                         slice(arr?, start, end)
                     }
-                });
-                self.unwrap(res, &p.span)
+                })
             }
-            _ => self.err(
-                "Unsupported expression in const definition. Unary, Binary, Identifier, Literal, InlineArray, ArrayInitializer, Postfix allowed.",
-                e.span()
+            _ => Err(
+                "Unsupported expression in const definition. Unary, Binary, Identifier, Literal, InlineArray, ArrayInitializer, Postfix allowed.".to_string(),
             ),
         }
     }
@@ -912,7 +907,9 @@ impl<'ast> ZGen<'ast> {
             .unwrap_or_else(|e| self.err(e.0, &c.span));
 
         // evaluate the expression and check the resulting type
-        let value = self.const_expr_(&c.expression);
+        let value = self
+            .const_expr_(&c.expression)
+            .unwrap_or_else(|e| self.err(e, c.expression.span()));
         if ctype != value.type_() {
             self.err("Type mismatch in constant definition", &c.span);
         }
