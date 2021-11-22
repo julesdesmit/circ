@@ -412,6 +412,20 @@ pub fn not(a: T) -> Result<T, String> {
     wrap_un_op("!", Some(not_uint), None, Some(not_bool), a)
 }
 
+pub fn const_bool_ref(a: &T) -> Result<bool, String> {
+    let s = match a {
+        T::Bool(b) => {
+            let folded = constant_fold(b);
+            match folded.op {
+                Op::Const(Value::Bool(b)) => Some(b),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    s.ok_or_else(|| format!("{} is not a constant bool", a))
+}
+
 pub fn const_int_ref(a: &T) -> Result<Integer, String> {
     let s = match &a {
         T::Field(b) => {

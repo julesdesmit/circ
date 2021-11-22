@@ -227,6 +227,14 @@ impl<'ast> ZGen<'ast> {
                 }
             }
             ast::Statement::Assertion(e) => {
+                // handle constant assertions (useful at compile time)
+                if let Ok(b) = self.const_expr_(&e.expression).and_then(|b| const_bool_ref(&b)) {
+                    if b {
+                        return;
+                    } else {
+                        self.err("const assert failed", &e.span);
+                    }
+                }
                 let b = bool(self.expr(&e.expression));
                 let e = self.unwrap(b, &e.span);
                 self.circ.assert(e);
