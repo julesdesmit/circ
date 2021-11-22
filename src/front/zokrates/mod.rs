@@ -101,7 +101,7 @@ struct ZGen<'ast> {
     generics_stack: Vec<HashMap<String, T>>,
     functions: HashMap<PathBuf, HashMap<String, ast::FunctionDefinition<'ast>>>,
     structs: HashMap<PathBuf, HashMap<String, ast::StructDefinition<'ast>>>,
-    str_tys: HashMap<PathBuf, HashMap<String, Ty>>,
+    //str_tys: HashMap<PathBuf, HashMap<String, Ty>>,
     constants: HashMap<PathBuf, HashMap<String, (ast::Type<'ast>, T)>>,
     import_map: HashMap<PathBuf, HashMap<String, (PathBuf, String)>>,
     mode: Mode,
@@ -133,7 +133,7 @@ impl<'ast> ZGen<'ast> {
             generics_stack: Vec::new(),
             functions: HashMap::new(),
             structs: HashMap::new(),
-            str_tys: HashMap::new(),
+            //str_tys: HashMap::new(),
             constants: HashMap::new(),
             import_map: HashMap::new(),
             mode,
@@ -429,6 +429,48 @@ impl<'ast> ZGen<'ast> {
         }
     }
 
+    fn generics_stack_push(&mut self, gvals: Vec<T>, gnames: Vec<ast::IdentifierExpression<'ast>>) {
+        self.generics_stack.push(gvals
+            .into_iter()
+            .zip(gnames.into_iter())
+            .map(|(g, n)| (n.value, g))
+            .collect()
+        );
+    }
+
+    fn explicit_generic_values(&self, eg: Option<&ast::ExplicitGenerics<'ast>>) -> Vec<T> {
+        eg.map(|g| {
+            g.values
+                .iter()
+                .map(|cgv| match cgv {
+                    ast::ConstantGenericValue::Value(l) => self.unwrap(self.literal_(&l), l.span()),
+                    ast::ConstantGenericValue::Identifier(i) => {
+                        if let Some(v) = self.generic_lookup_(&i.value) {
+                            v.clone()
+                        } else if let Some(v) = self.const_lookup_(&i.value) {
+                            v.clone()
+                        } else {
+                            self.err(
+                                format!(
+                                    "no const {} in current context",
+                                    &i.value
+                                ),
+                                &i.span,
+                            );
+                        }
+                    }
+                    ast::ConstantGenericValue::Underscore(u) => {
+                        self.err(
+                            "non-monomorphized generic argument",
+                            &u.span,
+                        );
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| Vec::new())
+    }
+
     fn expr(&mut self, e: &ast::Expression<'ast>) -> T {
         debug!("Expr: {}", e.span().as_str());
         let res = match e {
@@ -496,38 +538,7 @@ impl<'ast> ZGen<'ast> {
                         .iter()
                         .map(|e| self.expr(e))
                         .collect::<Vec<_>>();
-                    let generics = c.explicit_generics
-                        .as_ref()
-                        .map(|g| {
-                            g.values
-                                .iter()
-                                .map(|cgv| match cgv {
-                                    ast::ConstantGenericValue::Value(l) => self.unwrap(self.literal_(&l), l.span()),
-                                    ast::ConstantGenericValue::Identifier(i) => {
-                                        if let Some(v) = self.generic_lookup_(&i.value) {
-                                            v.clone()
-                                        } else if let Some(v) = self.const_lookup_(&i.value) {
-                                            v.clone()
-                                        } else {
-                                            self.err(
-                                                format!(
-                                                    "no const {} in current context",
-                                                    &i.value
-                                                ),
-                                                &i.span,
-                                            );
-                                        }
-                                    }
-                                    ast::ConstantGenericValue::Underscore(u) => {
-                                        self.err(
-                                            "non-monomorphized generic argument",
-                                            &u.span,
-                                        );
-                                    }
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_else(|| Vec::new());
+                    let generics = self.explicit_generic_values(c.explicit_generics.as_ref());
                     let res = if self.stdlib.is_embed(&f_path) {
                         self.unwrap(Self::builtin_call(&f_name, args, generics), &c.span)
                     } else {
@@ -546,12 +557,7 @@ impl<'ast> ZGen<'ast> {
                             self.err("wrong number of generic params for function call", &c.span);
                         }
                         self.file_stack.push(f_path);
-                        self.generics_stack.push(generics
-                            .into_iter()
-                            .zip(&f.generics[..])
-                            .map(|(g, n)| (n.value.clone(), g))
-                            .collect()
-                        );
+                        self.generics_stack_push(generics, f.generics);
                         // XXX(unimpl) tuple returns not supported
                         assert!(f.returns.len() <= 1);
                         let ret_ty = f.returns.first().map(|r| self.type_(r));
@@ -948,29 +954,20 @@ impl<'ast> ZGen<'ast> {
                     .fold(b, |b, d| Ty::Array(d as usize, Box::new(b)))
             }
             ast::Type::Struct(s) => {
-                // self.circ.get_type(&s.id.value).clone(),
-                // struct should already have been monomorphized!
-                if !s.explicit_generics.is_some() {
-                    self.err(format!("Found non-monomorphized struct {}", &s.id.value), &s.span);
+                let sdef = self.get_struct(&s.id.value).unwrap_or_else(||
+                    self.err(format!("No such struct {}", &s.id.value), &s.span)
+                ).clone();
+                let generics = self.explicit_generic_values(s.explicit_generics.as_ref());
+                if generics.len() != sdef.generics.len() {
+                    self.err(format!("Struct {} is not monomorphized or wrong number of generic parameters", &s.id.value), &s.span);
                 }
-                // get the type if already declared, else declare it
-                match self.get_str_ty(&s.id.value) {
-                    Some(t) => t.clone(),
-                    None => {
-                        let sdef = self.get_struct(&s.id.value).unwrap_or_else(||
-                            self.err(format!("No such struct {}", &s.id.value), &s.span)
-                        );
-                        if !sdef.generics.is_empty() {
-                            self.err(format!("Found non-monomorphized struct {}", &s.id.value), &s.span);
-                        }
-                        let ty = Ty::Struct(
-                            s.id.value.clone(),
-                            sdef.fields.clone().into_iter().map(|f| (f.id.value, self.type_(&f.ty))).collect()
-                        );
-                        assert!(self.insert_str_ty(&s.id.value, ty.clone()).is_none());
-                        ty
-                    }
-                }
+                self.generics_stack_push(generics, sdef.generics);
+                let ty = Ty::Struct(
+                    s.id.value.clone(),
+                    sdef.fields.into_iter().map(|f| (f.id.value, self.type_(&f.ty))).collect()
+                );
+                self.generics_stack.pop();
+                ty
             }
         }
     }
@@ -1145,10 +1142,12 @@ impl<'ast> ZGen<'ast> {
         self.asts = t;
     }
 
+    /*
     fn get_str_ty(&self, struct_id: &str) -> Option<&Ty> {
         let (s_path, s_name) = self.deref_import(struct_id);
         self.str_tys.get(&s_path).and_then(|m| m.get(&s_name))
     }
+    */
 
     fn get_struct(&self, struct_id: &str) -> Option<&ast::StructDefinition<'ast>> {
         let (s_path, s_name) = self.deref_import(struct_id);
@@ -1179,6 +1178,7 @@ impl<'ast> ZGen<'ast> {
     }
     */
 
+    /*
     fn insert_str_ty(
         &mut self,
         id: &str,
@@ -1190,6 +1190,7 @@ impl<'ast> ZGen<'ast> {
             .unwrap()
             .insert(s_name, ty)
     }
+    */
 
     fn insert_struct(
         &mut self,
