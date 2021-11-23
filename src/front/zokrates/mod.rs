@@ -1024,18 +1024,8 @@ impl<'ast> ZGen<'ast> {
         // 1. go through includes and return a toposorted visit order for remaining processing
         let files = self.visit_imports();
 
-        // 2. visit constant definitions, inferring types for const literals
-        self.visit_constants(files.clone());
-
-        // 3. visit struct definitions, inferring types for literals
-        // XXX(unimpl) visiting struct defs after const defs makes struct consts harder to support
-        //             but makes it possible to support consts in struct def'n.
-        // TODO(maybe) process const defs and struct defs in order, thereby allowing both as long
-        //             as all uses are after the respective definitions
-        self.visit_structs(files.clone());
-
-        // 4. visit function definitions, inferring types and generics
-        self.visit_functions(files);
+        // 2. visit constant, struct, and function defs ; infer types and generics
+        self.visit_declarations(files);
     }
 
     fn visit_imports(&mut self) -> Vec<PathBuf> {
@@ -1134,28 +1124,72 @@ impl<'ast> ZGen<'ast> {
             .collect()
     }
 
-    fn visit_constants(&mut self, files: Vec<PathBuf>) {
+    fn visit_declarations(&mut self, files: Vec<PathBuf>) {
         let mut t = std::mem::take(&mut self.asts);
+        let mut clr = ZConstLiteralRewriter::new(None);
         for p in files {
             self.constants.insert(p.clone(), HashMap::new());
+            self.structs.insert(p.clone(), HashMap::new());
+            self.functions.insert(p.clone(), HashMap::new());
             self.file_stack.push(p);
             for d in t.get_mut(self.cur_path()).unwrap().declarations.iter_mut() {
-                if let ast::SymbolDeclaration::Constant(c) = d {
-                    debug!("const {} in {}", c.id.value, self.cur_path().display());
-                    self.const_decl_(c);
+                match d {
+                    ast::SymbolDeclaration::Constant(c) => {
+                        debug!("const {} in {}", c.id.value, self.cur_path().display());
+                        self.const_decl_(c);
+                    }
+                    ast::SymbolDeclaration::Struct(s) => {
+                        debug!("struct {} in {}", s.id.value, self.cur_path().display());
+                        let mut s_ast = s.clone();
+
+                        // rewrite literals in ArrayTypes
+                        clr.visit_struct_definition(&mut s_ast)
+                            .unwrap_or_else(|e| self.err(e.0, &s.span));
+
+                        self.insert_struct(&s.id.value, s_ast);
+                    }
+                    ast::SymbolDeclaration::Function(f) => {
+                        debug!("fn {} in {}", f.id.value, self.cur_path().display());
+                        let mut f_ast = f.clone();
+
+                        // rewrite literals in params and returns
+                        let mut v = ZConstLiteralRewriter::new(None);
+                        f_ast
+                            .parameters
+                            .iter_mut()
+                            .try_for_each(|p| v.visit_parameter(p))
+                            .unwrap_or_else(|e| self.err(e.0, &f.span));
+                        f_ast
+                            .returns
+                            .iter_mut()
+                            .try_for_each(|r| v.visit_type(r))
+                            .unwrap_or_else(|e| self.err(e.0, &f.span));
+
+                        // go through stmts rewriting literals and generics
+                        let mut sw = ZStatementWalker::new(
+                            f_ast.parameters.as_ref(),
+                            f_ast.returns.as_ref(),
+                            f_ast.generics.as_ref(),
+                            self,
+                        );
+                        f_ast
+                            .statements
+                            .iter_mut()
+                            .try_for_each(|s| sw.visit_statement(s))
+                            .unwrap_or_else(|e| self.err(e.0, &f.span));
+
+                        self.functions
+                            .get_mut(self.file_stack.last().unwrap())
+                            .unwrap()
+                            .insert(f.id.value.clone(), f_ast);
+                    }
+                    ast::SymbolDeclaration::Import(_) => (), // already handled in visit_imports
                 }
             }
             self.file_stack.pop();
         }
         self.asts = t;
     }
-
-    /*
-    fn get_str_ty(&self, struct_id: &str) -> Option<&Ty> {
-        let (s_path, s_name) = self.deref_import(struct_id);
-        self.str_tys.get(&s_path).and_then(|m| m.get(&s_name))
-    }
-    */
 
     fn get_struct(&self, struct_id: &str) -> Option<&ast::StructDefinition<'ast>> {
         let (s_path, s_name) = self.deref_import(struct_id);
@@ -1187,6 +1221,13 @@ impl<'ast> ZGen<'ast> {
     */
 
     /*
+    fn get_str_ty(&self, struct_id: &str) -> Option<&Ty> {
+        let (s_path, s_name) = self.deref_import(struct_id);
+        self.str_tys.get(&s_path).and_then(|m| m.get(&s_name))
+    }
+    */
+
+    /*
     fn insert_str_ty(
         &mut self,
         id: &str,
@@ -1209,74 +1250,5 @@ impl<'ast> ZGen<'ast> {
             .get_mut(self.file_stack.last().unwrap())
             .unwrap()
             .insert(id.to_string(), def)
-    }
-
-    fn visit_structs(&mut self, files: Vec<PathBuf>) {
-        let t = std::mem::take(&mut self.asts);
-        for p in files {
-            self.structs.insert(p.clone(), HashMap::new());
-            self.file_stack.push(p);
-            for d in t.get(self.cur_path()).unwrap().declarations.iter() {
-                if let ast::SymbolDeclaration::Struct(s) = d {
-                    debug!("struct {} in {}", s.id.value, self.cur_path().display());
-                    let mut s_ast = s.clone();
-
-                    // rewrite literals in ArrayTypes
-                    ZConstLiteralRewriter::new(None)
-                        .visit_struct_definition(&mut s_ast)
-                        .unwrap_or_else(|e| self.err(e.0, &s.span));
-
-                    self.insert_struct(&s.id.value, s_ast);
-                }
-            }
-            self.file_stack.pop();
-        }
-        self.asts = t;
-    }
-
-    fn visit_functions(&mut self, files: Vec<PathBuf>) {
-        let t = std::mem::take(&mut self.asts);
-        for p in files {
-            self.functions.insert(p.clone(), HashMap::new());
-            self.file_stack.push(p);
-            for d in t.get(self.cur_path()).unwrap().declarations.iter() {
-                if let ast::SymbolDeclaration::Function(f) = d {
-                    debug!("fn {} in {}", f.id.value, self.cur_path().display());
-                    let mut f_ast = f.clone();
-
-                    // rewrite literals in params and returns
-                    let mut v = ZConstLiteralRewriter::new(None);
-                    f_ast
-                        .parameters
-                        .iter_mut()
-                        .try_for_each(|p| v.visit_parameter(p))
-                        .unwrap_or_else(|e| self.err(e.0, &f.span));
-                    f_ast
-                        .returns
-                        .iter_mut()
-                        .try_for_each(|r| v.visit_type(r))
-                        .unwrap_or_else(|e| self.err(e.0, &f.span));
-
-                    // go through stmts rewriting literals and generics
-                    let mut sw = ZStatementWalker::new(
-                        f_ast.parameters.as_ref(),
-                        f_ast.returns.as_ref(),
-                        f_ast.generics.as_ref(),
-                        self,
-                    );
-                    f_ast
-                        .statements
-                        .iter_mut()
-                        .try_for_each(|s| sw.visit_statement(s))
-                        .unwrap_or_else(|e| self.err(e.0, &f.span));
-
-                    self.functions
-                        .get_mut(self.file_stack.last().unwrap())
-                        .unwrap()
-                        .insert(f.id.value.clone(), f_ast);
-                }
-            }
-        }
-        self.asts = t;
     }
 }
