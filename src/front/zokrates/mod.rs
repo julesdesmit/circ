@@ -547,49 +547,8 @@ impl<'ast> ZGen<'ast> {
                         .map(|e| self.expr(e))
                         .collect::<Vec<_>>();
                     let generics = self.explicit_generic_values(c.explicit_generics.as_ref());
-                    let res = if self.stdlib.is_embed(&f_path) {
-                        self.unwrap(Self::builtin_call(&f_name, args, generics), &c.span)
-                    } else {
-                        let f = self
-                            .functions
-                            .get(&f_path)
-                            .unwrap_or_else(|| {
-                                self.err(format!("No file '{:?}'", &f_path), &p.span)
-                            })
-                            .get(&f_name)
-                            .unwrap_or_else(|| {
-                                self.err(format!("No function '{}'", &f_name), &p.span)
-                            })
-                            .clone();
-                        if f.generics.len() != generics.len() {
-                            self.err("wrong number of generic params for function call", &c.span);
-                        }
-                        self.file_stack.push(f_path);
-                        self.generics_stack_push(generics, f.generics);
-                        // XXX(unimpl) tuple returns not supported
-                        assert!(f.returns.len() <= 1);
-                        let ret_ty = f.returns.first().map(|r| self.type_(r));
-                        self.circ.enter_fn(f_name, ret_ty);
-                        assert_eq!(f.parameters.len(), args.len());
-                        for (p, a) in f.parameters.iter().zip(args) {
-                            let ty = self.type_(&p.ty);
-                            let d_res =
-                                self.circ.declare_init(p.id.value.clone(), ty, Val::Term(a));
-                            self.unwrap(d_res, &c.span);
-                        }
-                        for s in &f.statements {
-                            self.stmt(s);
-                        }
-                        let ret = self
-                            .circ
-                            .exit_fn()
-                            .map(|a| a.unwrap_term())
-                            .unwrap_or_else(|| Self::const_bool(false));
-                        self.generics_stack.pop();
-                        self.file_stack.pop();
-                        ret
-                    };
-                    (res, &p.accesses[1..])
+                    let res = self.function_call(args, generics, f_path, f_name);
+                     (self.unwrap(res, &c.span), &p.accesses[1..])
                 } else {
                     // Assume no calls
                     (
@@ -802,17 +761,18 @@ impl<'ast> ZGen<'ast> {
             .ok_or_else(|| format!("Undefined const identifier {}", &i.value))
     }
 
-    fn const_usize_r_(&self, e: &ast::Expression<'ast>) -> Result<usize, String> {
+    fn const_usize_r_(&mut self, e: &ast::Expression<'ast>) -> Result<usize, String> {
         const_int(self.const_expr_(e)?)?
             .to_usize()
             .ok_or_else(|| "Constant integer outside U32 range".to_string())
     }
 
-    fn const_usize_(&self, e: &ast::Expression<'ast>) -> usize {
-        self.unwrap(self.const_usize_r_(e), e.span())
+    fn const_usize_(&mut self, e: &ast::Expression<'ast>) -> usize {
+        let res = self.const_usize_r_(e);
+        self.unwrap(res, e.span())
     }
 
-    fn const_expr_(&self, e: &ast::Expression<'ast>) -> Result<T, String> {
+    fn const_expr_(&mut self, e: &ast::Expression<'ast>) -> Result<T, String> {
         match e {
             ast::Expression::Ternary(u) => {
                 match self.const_expr_(&u.first).and_then(|b| const_bool_ref(&b)) {
@@ -852,8 +812,18 @@ impl<'ast> ZGen<'ast> {
                 let num = self.const_usize_r_(&ai.count)?;
                 Ok(T::Array(val.type_(), vec![val; num]))
             }
-            ast::Expression::Postfix(p) => {
-                // make sure all accesses are Select, not Member or Call
+            ast::Expression::Postfix(p) => Ok(Self::const_bool(false)),
+            /*
+            {
+                // XXX(unimpl) Member not supported (because const Structs not supported)
+                assert!(acc.len() > 0);
+                let (arr, acc) = if let Some(ast::Access::Call(c)) = p.accesses.first() {
+                    // const function call
+
+                } else {
+                    (self.const_identifier_(&p.id)?, &p.accesses[..])
+                };
+
                 let mut acc = Vec::with_capacity(p.accesses.len());
                 p.accesses.iter().try_for_each(|a| match a {
                     ast::Access::Call(_) => Err(
@@ -874,7 +844,57 @@ impl<'ast> ZGen<'ast> {
                     }
                 })
             }
+            */
             ast::Expression::InlineStruct(_) => Err("Struct constants not supported".to_string()),
+        }
+    }
+
+    fn function_call(
+        &mut self,
+        args: Vec<T>,
+        generics: Vec<T>,
+        f_path: PathBuf,
+        f_name: String,
+    ) -> Result<T, String> {
+        if self.stdlib.is_embed(&f_path) {
+            Self::builtin_call(&f_name, args, generics)
+        } else {
+            let f = self
+                .functions
+                .get(&f_path)
+                .ok_or_else(|| format!("No file '{:?}' attempting fn call", &f_path))?
+                .get(&f_name)
+                .ok_or_else(|| format!("No function '{}' attempting fn call", &f_name))?
+                .clone();
+            if f.generics.len() != generics.len() {
+                return Err("Wrong number of generic params for function call".to_string());
+            }
+            if f.parameters.len() != args.len() {
+                return Err("Wrong nimber of arguments for function call".to_string());
+            }
+            self.file_stack.push(f_path);
+            self.generics_stack_push(generics, f.generics);
+            // XXX(unimpl) tuple returns not supported
+            assert!(f.returns.len() <= 1);
+            let ret_ty = f.returns.first().map(|r| self.type_(r));
+            self.circ.enter_fn(f_name, ret_ty);
+            for (p, a) in f.parameters.iter().zip(args) {
+                let ty = self.type_(&p.ty);
+                self.circ
+                    .declare_init(p.id.value.clone(), ty, Val::Term(a))
+                    .map_err(|e| format!("{}", e))?;
+            }
+            for s in &f.statements {
+                self.stmt(s);
+            }
+            let ret = self
+                .circ
+                .exit_fn()
+                .map(|a| a.unwrap_term())
+                .unwrap_or_else(|| Self::const_bool(false));
+            self.generics_stack.pop();
+            self.file_stack.pop();
+            Ok(ret)
         }
     }
 
