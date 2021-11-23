@@ -797,11 +797,9 @@ impl<'ast> ZGen<'ast> {
     }
 
     fn const_identifier_(&self, i: &ast::IdentifierExpression<'ast>) -> Result<T, String> {
-        if let Some(val) = self.const_lookup_(i.value.as_ref()) {
-            Ok(val.clone())
-        } else {
-            Err(format!("Undefined const identifier {}", &i.value))
-        }
+        self.const_lookup_(i.value.as_ref())
+            .cloned()
+            .ok_or_else(|| format!("Undefined const identifier {}", &i.value))
     }
 
     fn const_usize_r_(&self, e: &ast::Expression<'ast>) -> Result<usize, String> {
@@ -816,6 +814,13 @@ impl<'ast> ZGen<'ast> {
 
     fn const_expr_(&self, e: &ast::Expression<'ast>) -> Result<T, String> {
         match e {
+            ast::Expression::Ternary(u) => {
+                match self.const_expr_(&u.first).and_then(|b| const_bool_ref(&b)) {
+                    Ok(true) => self.const_expr_(&u.second),
+                    Ok(false) => self.const_expr_(&u.third),
+                    Err(e) => self.err(format!("ternary condition not const bool: {}", e), &u.span),
+                }
+            }
             ast::Expression::Binary(b) => {
                 let left = self.const_expr_(&b.left)?;
                 let right = self.const_expr_(&b.right)?;
@@ -869,9 +874,7 @@ impl<'ast> ZGen<'ast> {
                     }
                 })
             }
-            _ => Err(
-                "Unsupported expression in const definition. Unary, Binary, Identifier, Literal, InlineArray, ArrayInitializer, Postfix allowed.".to_string(),
-            ),
+            ast::Expression::InlineStruct(_) => Err("Struct constants not supported".to_string()),
         }
     }
 
