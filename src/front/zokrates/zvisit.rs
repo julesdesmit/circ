@@ -1631,7 +1631,7 @@ impl<'ast> ZVisitorMut<'ast> for ZExpressionRewriter<'ast> {
 pub(super) struct ZStatementWalker<'ast, 'ret> {
     rets: &'ret [ast::Type<'ast>],
     gens: &'ret [ast::IdentifierExpression<'ast>],
-    zgen: &'ret mut ZGen<'ast>,
+    zgen: &'ret ZGen<'ast>,
     vars: Vec<HashMap<String, ast::Type<'ast>>>,
 }
 
