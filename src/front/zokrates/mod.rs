@@ -741,7 +741,7 @@ impl<'ast> ZGen<'ast> {
     }
 
     fn generic_lookup_(&self, i: &str) -> Option<T> {
-        self.generics_stack.borrow().last().unwrap().get(i).cloned()
+        self.generics_stack.borrow().iter().rev().find_map(|v| v.get(i)).cloned()
     }
 
     fn const_ty_lookup_(&self, i: &str) -> Option<&ast::Type<'ast>> {
@@ -786,6 +786,7 @@ impl<'ast> ZGen<'ast> {
     }
 
     fn const_expr_(&self, e: &ast::Expression<'ast>) -> Result<T, String> {
+        debug!("Const expr: {}", e.span().as_str());
         match e {
             ast::Expression::Ternary(u) => {
                 match self.const_expr_(&u.first).and_then(|b| const_bool_ref(&b)) {
@@ -916,6 +917,7 @@ impl<'ast> ZGen<'ast> {
         f_path: PathBuf,
         f_name: String,
     ) -> Result<T, String> {
+        debug!("function_call: {} {:?} {:?} {:?}", f_name, f_path, args, generics);
         if self.stdlib.is_embed(&f_path) {
             Self::builtin_call(&f_name, args, generics)
         } else {
