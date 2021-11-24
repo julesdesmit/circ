@@ -648,11 +648,9 @@ impl<'ast> ZGen<'ast> {
                         "When compiling to optimize, there can only be one output"
                     );
                     let t = ret_terms.into_iter().next().unwrap();
-                    match check(&t) {
-                        Sort::BitVector(_) => {}
-                        s => {
-                            panic!("Cannot maximize output of type {}", s)
-                        }
+                    let t_sort = check(&t);
+                    if !matches!(t_sort, Sort::BitVector(_)) {
+                        panic!("Cannot maximize output of type {}", t_sort);
                     }
                     self.circ.borrow().cir_ctx().cs.borrow_mut().outputs.push(t);
                 }
@@ -665,14 +663,10 @@ impl<'ast> ZGen<'ast> {
                     );
                     let t = ret_terms.into_iter().next().unwrap();
                     let cmp = match check(&t) {
-                        Sort::BitVector(w) => {
-                            term![BV_UGE; t, bv_lit(v, w)]
-                        }
-                        s => {
-                            panic!("Cannot maximize output of type {}", s)
-                        }
+                        Sort::BitVector(w) => term![BV_UGE; t, bv_lit(v, w)],
+                        s => panic!("Cannot maximize output of type {}", s),
                     };
-                    self.circ.cir_ctx().cs.borrow_mut().outputs.push(cmp);
+                    self.circ.borrow().cir_ctx().cs.borrow_mut().outputs.push(cmp);
                 }
             }
         }
