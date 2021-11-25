@@ -9,7 +9,7 @@ use zexprrewriter::ZExpressionRewriter;
 use zexprtyper::ZExpressionTyper;
 use super::walkfns::*;
 use super::{ZConstLiteralRewriter, ZVisitorMut, ZVisitorError, ZVisitorResult, ZResult};
-use super::super::term::{const_int, const_int_ref};
+use super::super::term::{const_int, const_int_ref, Ty};
 use super::super::ZGen;
 
 use log::debug;
@@ -54,16 +54,27 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         }
     }
 
+    fn type_expression<'wlk>(
+        &self,
+        expr: &mut ast::Expression<'ast>,
+        zty: &mut ZExpressionTyper<'ast, 'ret, 'wlk>,
+    ) -> ZResult<Option<ast::Type<'ast>>> {
+        zty.visit_expression(expr)?;
+        zty.take()
+            .map(|to_ty| self.unify_expression(to_ty.clone(), expr).map(|()| to_ty))
+            .transpose()
+    }
+
     // XXX(opt) take ref to Type instead of owned?
     fn unify(
         &self,
         ty: Option<ast::Type<'ast>>,
         expr: &mut ast::Expression<'ast>,
     ) -> ZVisitorResult {
+        // start with the simple constant literal rewrites
         let mut rewriter = ZConstLiteralRewriter::new(None);
         rewriter.visit_expression(expr)?;
-        let ty = if let Some(ty) = ty { ty } else { return Ok(()) };
-        self.unify_expression(ty, expr)
+        ty.map(|ty| self.unify_expression(ty, expr)).unwrap_or(Ok(()))
     }
 
     fn unify_expression(
@@ -498,8 +509,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             // step 2: for each function argument unify type and update cgvs
             let mut zty = ZExpressionTyper::new(self);
             for (exp, pty) in call.arguments.expressions.iter_mut().zip(par.iter().map(|p| &p.ty)) {
-                zty.visit_expression(exp)?;
-                let aty = zty.take();
+                let aty = self.type_expression(exp, &mut zty)?;
                 if let Some(aty) = aty {
                     self.fdef_gen_ty(pty, &aty, egv, &gid_map)?;
                 } else {
@@ -780,10 +790,8 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             Eq | NotEq | Lt | Gt | Lte | Gte => match &bt {
                 Boolean(_) => {
                     let mut expr_walker = ZExpressionTyper::new(self);
-                    expr_walker.visit_expression(&mut be.left)?;
-                    let lty = expr_walker.take();
-                    expr_walker.visit_expression(&mut be.right)?;
-                    let rty = expr_walker.take();
+                    let lty = self.type_expression(&mut be.left, &mut expr_walker)?;
+                    let rty = self.type_expression(&mut be.right, &mut expr_walker)?;
                     match (&lty, &rty) {
                             (Some(Basic(_)), None) => Ok((lty.clone().unwrap(), lty.unwrap())),
                             (None, Some(Basic(_))) => Ok((rty.clone().unwrap(), rty.unwrap())),
@@ -1339,7 +1347,7 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
         def: &mut ast::DefinitionStatement<'ast>,
     ) -> ZVisitorResult {
         // XXX(unimpl) no L<-R generic inference right now.
-        // REVISIT: if LHS is typed identifier and RHS has complete type, infer L<-R
+        // REVISIT: if LHS is generic typed identifier and RHS has complete type, infer L<-R
         def.lhs
             .iter_mut()
             .try_for_each(|l| self.visit_typed_identifier_or_assignee(l))?;
@@ -1404,6 +1412,52 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
                 self.visit_typed_identifier(ti)
             }
         }
+    }
+
+    fn visit_range_or_expression(
+        &mut self,
+        roe: &mut ast::RangeOrExpression<'ast>,
+    ) -> ZVisitorResult {
+        use ast::RangeOrExpression::*;
+        match roe {
+            Range(r) => self.visit_range(r),
+            Expression(e) => {
+                let mut zty = ZExpressionTyper::new(self);
+                if self.type_expression(e, &mut zty)?.is_none() {
+                    let mut zrw = ZConstLiteralRewriter::new(Some(Ty::Uint(32)));
+                    zrw.visit_expression(e)?;
+                }
+                self.visit_expression(e)
+            }
+        }
+    }
+
+    fn visit_range(
+        &mut self,
+        rng: &mut ast::Range<'ast>,
+    ) -> ZVisitorResult {
+        let mut zty = ZExpressionTyper::new(self);
+        let fty = rng.from.as_mut()
+            .map(|fexp| self.type_expression(&mut fexp.0, &mut zty)).transpose()?.flatten();
+        let tty = rng.to.as_mut()
+            .map(|texp| self.type_expression(&mut texp.0, &mut zty)).transpose()?.flatten();
+        match (fty, tty) {
+            (None, None) => {
+                let mut zrw = ZConstLiteralRewriter::new(Some(Ty::Uint(32)));
+                rng.from.as_mut().map(|fexp| zrw.visit_expression(&mut fexp.0)).transpose()?;
+                rng.to.as_mut().map(|texp| zrw.visit_expression(&mut texp.0)).transpose()?;
+                Ok(())
+            }
+            (Some(fty), None) => rng.to.as_mut().map(|texp| self.unify_expression(fty, &mut texp.0)).unwrap_or(Ok(())),
+            (None, Some(tty)) => rng.from.as_mut().map(|fexp| self.unify_expression(tty, &mut fexp.0)).unwrap_or(Ok(())),
+            (Some(fty), Some(tty)) => eq_type(&fty, &tty)
+                .map_err(|e| ZVisitorError(format!(
+                    "typing Range: {}\n{}",
+                    e.0,
+                    span_to_string(&rng.span),
+                ))),
+        }?;
+        self.visit_span(&mut rng.span)
     }
 }
 
