@@ -741,7 +741,7 @@ impl<'ast> ZGen<'ast> {
     }
 
     fn generic_lookup_(&self, i: &str) -> Option<T> {
-        self.generics_stack.borrow().iter().rev().find_map(|v| v.get(i)).cloned()
+        self.generics_stack.borrow().last().and_then(|m| m.get(i)).cloned()
     }
 
     fn const_ty_lookup_(&self, i: &str) -> Option<&ast::Type<'ast>> {
@@ -769,9 +769,8 @@ impl<'ast> ZGen<'ast> {
     }
 
     fn const_identifier_(&self, i: &ast::IdentifierExpression<'ast>) -> Result<T, String> {
-        // XXX(rsw) look up in generics first!
-        self.const_lookup_(i.value.as_ref())
-            .cloned()
+        self.generic_lookup_(i.value.as_ref())
+            .or_else(|| self.const_lookup_(i.value.as_ref()).cloned())
             .ok_or_else(|| format!("Undefined const identifier {}", &i.value))
     }
 
