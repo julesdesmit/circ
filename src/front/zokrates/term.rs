@@ -39,7 +39,22 @@ impl Display for Ty {
             Ty::Uint(w) => write!(f, "u{}", w),
             Ty::Field => write!(f, "field"),
             Ty::Struct(n, _) => write!(f, "{}", n),
-            Ty::Array(n, b) => write!(f, "{}[{}]", b, n),
+            Ty::Array(n, b) => {
+                let mut dims = Vec::new();
+                dims.push(n);
+                let mut bb = b.as_ref();
+                loop {
+                    match bb {
+                        Ty::Array(n, b) => {
+                            bb = b.as_ref();
+                            dims.push(n);
+                        }
+                        _ => break,
+                    }
+                }
+                write!(f, "{}", bb)?;
+                dims.iter().try_for_each(|d| write!(f, "[{}]", d))
+            }
         }
     }
 }
@@ -158,10 +173,10 @@ impl Display for T {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         match self {
             T::Bool(x) => write!(f, "Bool({})", x),
-            T::Uint(_, x) => write!(f, "Uint({})", x),
+            T::Uint(s, x) => write!(f, "Uint{}({})", s, x),
             T::Field(x) => write!(f, "Field({})", x),
-            T::Struct(_, _) => write!(f, "struct"),
-            T::Array(_, _) => write!(f, "array"),
+            T::Struct(sn, _) => write!(f, "struct({})", sn),
+            T::Array(_, _) => write!(f, "array({})", self.type_()),
         }
     }
 }
@@ -573,17 +588,28 @@ pub fn array_select(array: T, idx: T) -> Result<T, String> {
     })
 }
 
+// XXX(opt) can this take &T instead of T?
 pub fn array_store(array: T, idx: T, val: T) -> Result<T, String> {
-    match (array, idx) {
-        (T::Array(ty, list), T::Field(idx)) => Ok(T::Array(
-            ty,
-            list.into_iter()
-                .enumerate()
-                .map(|(i, elem)| ite(term![Op::Eq; pf_lit(i), idx.clone()], val.clone(), elem))
-                .collect::<Result<Vec<_>, _>>()?,
-        )),
-        (arr, idx) => Err(format!("Cannot index {} using {}", arr, idx)),
-    }
+    let (ty, list) = match array {
+        T::Array(ty, list) => Ok((ty, list)),
+        a => Err(format!("Cannot index non-array type {}", a)),
+    }?;
+    // XXX(rsw) should we actually allow indexing with both Field and u*?
+    let idx = match idx {
+        T::Field(idx) => {
+            warn!("ZoKrates front-end indexes array with Field type");
+            Ok(idx)
+        }
+        T::Uint(_, idx) => Ok(idx),
+        b => Err(format!("Cannot index array with non-numeric type {}", b)),
+    }?;
+
+    Ok(T::Array(ty, list
+        .into_iter()
+        .enumerate()
+        .map(|(i, elem)| ite(term![Op::Eq; pf_lit(i), idx.clone()], val.clone(), elem))
+        .collect::<Result<Vec<_>, _>>()?
+    ))
 }
 
 fn array<I: IntoIterator<Item = T>>(elems: I) -> Result<T, String> {

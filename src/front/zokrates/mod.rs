@@ -769,6 +769,7 @@ impl<'ast> ZGen<'ast> {
     }
 
     fn const_identifier_(&self, i: &ast::IdentifierExpression<'ast>) -> Result<T, String> {
+        // XXX(rsw) look up in generics first!
         self.const_lookup_(i.value.as_ref())
             .cloned()
             .ok_or_else(|| format!("Undefined const identifier {}", &i.value))
@@ -976,6 +977,7 @@ impl<'ast> ZGen<'ast> {
                 };
                 a.dimensions
                     .iter()
+                    .rev()
                     .map(|d| self.const_usize_(d))
                     .fold(b, |b, d| Ty::Array(d, Box::new(b)))
             }
@@ -1039,6 +1041,7 @@ impl<'ast> ZGen<'ast> {
                 let b = self.type_(&lift(&a.ty));
                 a.dimensions
                     .iter()
+                    .rev()
                     .map(|d| self.const_int(d))
                     .fold(b, |b, d| Ty::Array(d as usize, Box::new(b)))
             }
