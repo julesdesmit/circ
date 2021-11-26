@@ -1218,11 +1218,11 @@ impl<'ast> ZGen<'ast> {
             for d in t.get_mut(&p).unwrap().declarations.iter_mut() {
                 match d {
                     ast::SymbolDeclaration::Constant(c) => {
-                        debug!("const {} in {}", c.id.value, p.display());
+                        debug!("processing decl: const {} in {}", c.id.value, p.display());
                         self.const_decl_(c);
                     }
                     ast::SymbolDeclaration::Struct(s) => {
-                        debug!("struct {} in {}", s.id.value, p.display());
+                        debug!("processing decl: struct {} in {}", s.id.value, p.display());
                         let mut s_ast = s.clone();
 
                         // rewrite literals in ArrayTypes
@@ -1232,7 +1232,7 @@ impl<'ast> ZGen<'ast> {
                         self.insert_struct(&s.id.value, s_ast);
                     }
                     ast::SymbolDeclaration::Function(f) => {
-                        debug!("fn {} in {}", f.id.value, p.display());
+                        debug!("processing decl: fn {} in {}", f.id.value, p.display());
                         let mut f_ast = f.clone();
 
                         // rewrite literals in params and returns

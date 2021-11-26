@@ -265,8 +265,8 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             // did is a const, but rid is a generic arg
             Err(ZVisitorError(format!(
                 "Generic identifier {} is not identically const identifier {}",
-                &did.value,
                 &rid.value,
+                &did.value,
             )))
         } else {
             match (self.zgen.const_lookup_(did.value.as_str()),
