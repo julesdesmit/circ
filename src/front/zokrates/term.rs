@@ -66,7 +66,7 @@ impl fmt::Debug for Ty {
 }
 
 impl Ty {
-    fn default(&self) -> T {
+    pub(super) fn default(&self) -> T {
         match self {
             Self::Bool => T::Bool(leaf_term(Op::Const(Value::Bool(false)))),
             Self::Uint(w) => T::Uint(*w, bv_lit(0, *w)),

@@ -8,7 +8,7 @@ use super::FrontEnd;
 use crate::circify::{CircError, Circify, Loc, Val};
 use crate::ir::proof::{self, ConstraintMetadata};
 use crate::ir::term::*;
-use log::debug;
+use log::{debug, warn};
 use rug::Integer;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -102,10 +102,11 @@ struct ZGen<'ast> {
     generics_stack: RefCell<Vec<HashMap<String, T>>>,
     functions: HashMap<PathBuf, HashMap<String, ast::FunctionDefinition<'ast>>>,
     structs: HashMap<PathBuf, HashMap<String, ast::StructDefinition<'ast>>>,
-    //str_tys: HashMap<PathBuf, HashMap<String, Ty>>,
     constants: HashMap<PathBuf, HashMap<String, (ast::Type<'ast>, T)>>,
     import_map: HashMap<PathBuf, HashMap<String, (PathBuf, String)>>,
     mode: Mode,
+    cvars_stack: RefCell<Vec<Vec<HashMap<String, T>>>>,
+    crets_stack: RefCell<Vec<Option<T>>>,
 }
 
 enum ZLoc {
@@ -134,10 +135,11 @@ impl<'ast> ZGen<'ast> {
             generics_stack: Default::default(),
             functions: HashMap::new(),
             structs: HashMap::new(),
-            //str_tys: HashMap::new(),
             constants: HashMap::new(),
             import_map: HashMap::new(),
             mode,
+            cvars_stack: Default::default(),
+            crets_stack: Default::default(),
         };
         this.circ
             .borrow()
@@ -589,6 +591,55 @@ impl<'ast> ZGen<'ast> {
         };
         self.unwrap(res, e.span())
     }
+
+    fn function_call(
+        &self,
+        args: Vec<T>,
+        generics: Vec<T>,
+        f_path: PathBuf,
+        f_name: String,
+    ) -> Result<T, String> {
+        debug!("Function call: {} {:?} {:?} {:?}", f_name, f_path, args, generics);
+        if self.stdlib.is_embed(&f_path) {
+            Self::builtin_call(&f_name, args, generics)
+        } else {
+            let f = self
+                .functions
+                .get(&f_path)
+                .ok_or_else(|| format!("No file '{:?}' attempting fn call", &f_path))?
+                .get(&f_name)
+                .ok_or_else(|| format!("No function '{}' attempting fn call", &f_name))?
+                .clone();
+            if f.generics.len() != generics.len() {
+                return Err("Wrong number of generic params for function call".to_string());
+            }
+            if f.parameters.len() != args.len() {
+                return Err("Wrong nimber of arguments for function call".to_string());
+            }
+            self.file_stack_push(f_path);
+            self.generics_stack_push(generics, f.generics);
+            // XXX(unimpl) tuple returns not supported
+            assert!(f.returns.len() <= 1);
+            let ret_ty = f.returns.first().map(|r| self.type_(r));
+            self.circ_enter_fn(f_name, ret_ty);
+            for (p, a) in f.parameters.into_iter().zip(args) {
+                let ty = self.type_(&p.ty);
+                self.circ_declare_init(p.id.value, ty, Val::Term(a))
+                    .map_err(|e| format!("{}", e))?;
+            }
+            for s in &f.statements {
+                self.stmt(s);
+            }
+            let ret = self
+                .circ_exit_fn()
+                .map(|a| a.unwrap_term())
+                .unwrap_or_else(|| Self::const_bool(false));
+            self.generics_stack_pop();
+            self.file_stack_pop();
+            Ok(ret)
+        }
+    }
+
     fn entry_fn(&self, n: &str) {
         debug!("Entry: {}", n);
         // find the entry function
@@ -774,10 +825,16 @@ impl<'ast> ZGen<'ast> {
             .ok_or_else(|| format!("Undefined const identifier {}", &i.value))
     }
 
+    fn const_isize_r_(&self, e: &ast::Expression<'ast>) -> Result<isize, String> {
+        const_int(self.const_expr_(e)?)?
+            .to_isize()
+            .ok_or_else(|| "Constant integer outside isize range".to_string())
+    }
+
     fn const_usize_r_(&self, e: &ast::Expression<'ast>) -> Result<usize, String> {
         const_int(self.const_expr_(e)?)?
             .to_usize()
-            .ok_or_else(|| "Constant integer outside U32 range".to_string())
+            .ok_or_else(|| "Constant integer outside usize range".to_string())
     }
 
     fn const_usize_(&self, e: &ast::Expression<'ast>) -> usize {
@@ -785,6 +842,7 @@ impl<'ast> ZGen<'ast> {
         self.unwrap(res, e.span())
     }
 
+    // XXX(rsw) make Result<T, (String, &Span)> to give more precise error messages?
     fn const_expr_(&self, e: &ast::Expression<'ast>) -> Result<T, String> {
         debug!("Const expr: {}", e.span().as_str());
         match e {
@@ -838,8 +896,8 @@ impl<'ast> ZGen<'ast> {
                         .map(|e| self.const_expr_(e))
                         .collect::<Result<Vec<_>, _>>()?;
                     let generics = self.explicit_generic_values(c.explicit_generics.as_ref());
-                    let res = self.function_call(args, generics, f_path, f_name);
-                    (self.unwrap(res, &c.span), &p.accesses[1..])
+                    let res = self.const_function_call_(args, generics, f_path, f_name)?;
+                    (res, &p.accesses[1..])
                 } else {
                     (self.const_identifier_(&p.id)?, &p.accesses[..])
                 };
@@ -866,6 +924,52 @@ impl<'ast> ZGen<'ast> {
         }
     }
 
+    fn const_function_call_(
+        &self,
+        args: Vec<T>,
+        generics: Vec<T>,
+        f_path: PathBuf,
+        f_name: String,
+    ) -> Result<T, String> {
+        debug!("Const function call: {} {:?} {:?} {:?}", f_name, f_path, args, generics);
+        if self.stdlib.is_embed(&f_path) {
+            Self::builtin_call(&f_name, args, generics)
+        } else {
+            let f = self
+                .functions
+                .get(&f_path)
+                .ok_or_else(|| format!("No file '{:?}' attempting const fn call", &f_path))?
+                .get(&f_name)
+                .ok_or_else(|| format!("No function '{}' attempting const fn call", &f_name))?
+                .clone();
+            if f.generics.len() != generics.len() {
+                Err("Wrong number of generic params for function call".to_string())?;
+            }
+            if f.parameters.len() != args.len() {
+                Err("Wrong number of arguments for function call".to_string())?;
+            }
+            // XXX(unimpl) tuple returns not supported
+            assert!(f.returns.len() <= 1);
+            self.file_stack_push(f_path);
+            self.generics_stack_push(generics, f.generics);
+            self.cvar_enter_function();
+            for (p, a) in f.parameters.into_iter().zip(args) {
+                let ty = self.type_(&p.ty);
+                self.cvar_declare_init(p.id.value, &ty, a)?;
+            }
+            for s in &f.statements {
+                self.const_stmt_(s)?;
+            }
+            let ret = self
+                .crets_pop()
+                .unwrap_or_else(|| Self::const_bool(false));
+            self.cvar_exit_function();
+            self.generics_stack_pop();
+            self.file_stack_pop();
+            Ok(ret)
+        }
+    }
+
     fn const_stmt_(&self, s: &ast::Statement<'ast>) -> Result<(), String> {
         debug!("Const stmt: {}", s.span().as_str());
         match s {
@@ -874,9 +978,9 @@ impl<'ast> ZGen<'ast> {
                 assert!(r.expressions.len() <= 1);
                 if let Some(e) = r.expressions.first() {
                     let ret = self.const_expr_(e)?;
-                    // return ret
+                    self.crets_push(Some(ret));
                 } else {
-                    // return None
+                    self.crets_push(None);
                 }
                 Ok(())
             }
@@ -903,33 +1007,34 @@ impl<'ast> ZGen<'ast> {
                     Ty::Uint(64) => T::new_u64,
                     _ => { return Err(format!("Iteration variable must be Field or Uint, got {:?}", ty)); }
                 };
-
-                let s = self.const_usize_r_(&i.from)?;
-                let e = self.const_usize_r_(&i.to)?;
+                // XXX(rsw) CHECK does this work if the range includes negative numbers?
+                let s = self.const_isize_r_(&i.from)?;
+                let e = self.const_isize_r_(&i.to)?;
                 let v_name = i.index.value.clone();
-                // enter scope
-                // declare v_name
+                self.cvar_enter_scope();
+                self.cvar_declare(v_name, &ty)?;
                 for j in s..e {
-                    // enter scope
-                    // assign v_name = j
+                    self.cvar_enter_scope();
+                    self.cvar_assign(&i.index.value, ival_cons(j))?;
                     for s in &i.statements {
                         self.const_stmt_(s)?;
                     }
-                    // exit scope
+                    self.cvar_exit_scope();
                 }
-                // exit scope
+                self.cvar_exit_scope();
                 Ok(())
             }
             ast::Statement::Definition(d) => {
                 // XXX(unimpl) multi-assignment unimplemented
                 assert!(d.lhs.len() <= 1);
-                let e = self.expr(&d.expression);
+                let e = self.const_expr_(&d.expression)?;
                 if let Some(l) = d.lhs.first() {
                     let ty = e.type_();
                     match l {
                         ast::TypedIdentifierOrAssignee::Assignee(l) => {
-                            // find the in-scope identifier with this name
-                            // check the type and assign
+                            // TODO find the in-scope identifier with this name
+                            // TODO check the type
+                            // TODO assign
                             Ok(())
                         }
                         ast::TypedIdentifierOrAssignee::TypedIdentifier(l) => {
@@ -940,107 +1045,81 @@ impl<'ast> ZGen<'ast> {
                                     decl_ty, ty,
                                 ))?;
                             }
-                            // declare variable in this scope, assign
-                            Ok(())
+                            self.cvar_declare_init(l.identifier.value.clone(), &decl_ty, e)
                         }
                     }
                 } else {
+                    warn!("Const statement with no LHS!");
                     Ok(())
                 }
             }
         }
     }
 
-    fn circ_assert(&self, asrt: Term) {
-        self.circ.borrow_mut().assert(asrt)
+    fn cvar_enter_scope(&self) {
+        assert!(!self.cvars_stack.borrow().is_empty());
+        self.cvars_stack.borrow_mut().last_mut().unwrap().push(HashMap::new());
     }
 
-    fn circ_return_(&self, ret: Option<T>) -> Result<(), CircError> {
-        self.circ.borrow_mut().return_(ret)
+    fn cvar_exit_scope(&self) {
+        assert!(!self.cvars_stack.borrow().last().unwrap().is_empty());
+        self.cvars_stack.borrow_mut().last_mut().unwrap().pop();
     }
 
-    fn circ_enter_fn(&self, f_name: String, ret_ty: Option<Ty>) {
-        self.circ.borrow_mut().enter_fn(f_name, ret_ty)
+    fn cvar_enter_function(&self) {
+        self.cvars_stack.borrow_mut().push(Vec::new());
+        self.cvar_enter_scope();
     }
 
-    fn circ_exit_fn(&self) -> Option<Val<T>> {
-        self.circ.borrow_mut().exit_fn()
+    fn cvar_exit_function(&self) {
+        self.cvars_stack.borrow_mut().pop();
     }
 
-    fn circ_enter_scope(&self) {
-        self.circ.borrow_mut().enter_scope()
-    }
-
-    fn circ_exit_scope(&self) {
-        self.circ.borrow_mut().exit_scope()
-    }
-
-    fn circ_declare(&self, name: String, ty: &Ty, input: bool, vis: Option<PartyId>) -> Result<(), CircError> {
-        self.circ.borrow_mut().declare(name, ty, input, vis)
-    }
-
-    fn circ_declare_init(&self, name: String, ty: Ty, val: Val<T>) -> Result<Val<T>, CircError> {
-        self.circ.borrow_mut().declare_init(name, ty, val)
-    }
-
-    fn circ_get_value(&self, loc: Loc) -> Result<Val<T>, CircError> {
-        self.circ.borrow().get_value(loc)
-    }
-
-    fn circ_assign(&self, loc: Loc, val: Val<T>) -> Result<Val<T>, CircError> {
-        self.circ.borrow_mut().assign(loc, val)
-    }
-
-    fn circ_assign_with_assertions(&self, name: String, term: T, ty: &Ty, vis: Option<PartyId>) {
-        self.circ.borrow_mut().assign_with_assertions(name, term, ty, vis)
-    }
-
-    fn function_call(
-        &self,
-        args: Vec<T>,
-        generics: Vec<T>,
-        f_path: PathBuf,
-        f_name: String,
-    ) -> Result<T, String> {
-        debug!("function_call: {} {:?} {:?} {:?}", f_name, f_path, args, generics);
-        if self.stdlib.is_embed(&f_path) {
-            Self::builtin_call(&f_name, args, generics)
-        } else {
-            let f = self
-                .functions
-                .get(&f_path)
-                .ok_or_else(|| format!("No file '{:?}' attempting fn call", &f_path))?
-                .get(&f_name)
-                .ok_or_else(|| format!("No function '{}' attempting fn call", &f_name))?
-                .clone();
-            if f.generics.len() != generics.len() {
-                return Err("Wrong number of generic params for function call".to_string());
+    fn cvar_assign(&self, name: &str, val: T) -> Result<(), String> {
+        assert!(!self.cvars_stack.borrow().last().unwrap().is_empty());
+        match self.cvars_stack.borrow_mut().last_mut().unwrap().iter_mut().rev().find_map(|v| v.get_mut(name)) {
+            None => Err(format!("Const assign failed: no variable {} in scope", name)),
+            Some(old_val) => {
+                if old_val.type_() != val.type_() {
+                    Err(format!(
+                        "Const assign type mismatch: got {}, expected {}",
+                        val.type_(),
+                        old_val.type_(),
+                    ))
+                } else {
+                    *old_val = val;
+                    Ok(())
+                }
             }
-            if f.parameters.len() != args.len() {
-                return Err("Wrong nimber of arguments for function call".to_string());
-            }
-            self.file_stack_push(f_path);
-            self.generics_stack_push(generics, f.generics);
-            // XXX(unimpl) tuple returns not supported
-            assert!(f.returns.len() <= 1);
-            let ret_ty = f.returns.first().map(|r| self.type_(r));
-            self.circ_enter_fn(f_name, ret_ty);
-            for (p, a) in f.parameters.iter().zip(args) {
-                let ty = self.type_(&p.ty);
-                self.circ_declare_init(p.id.value.clone(), ty, Val::Term(a))
-                    .map_err(|e| format!("{}", e))?;
-            }
-            for s in &f.statements {
-                self.stmt(s);
-            }
-            let ret = self
-                .circ_exit_fn()
-                .map(|a| a.unwrap_term())
-                .unwrap_or_else(|| Self::const_bool(false));
-            self.generics_stack_pop();
-            self.file_stack_pop();
-            Ok(ret)
         }
+    }
+
+    fn cvar_declare_init(&self, name: String, ty: &Ty, val: T) -> Result<(), String> {
+        assert!(!self.cvars_stack.borrow().last().unwrap().is_empty());
+        if val.type_() != *ty {
+            Err(format!("Const decl_init: {} type mismatch: expected {}, got {}", name, ty, val.type_()))?;
+        }
+        self.cvars_stack
+            .borrow_mut()
+            .last_mut()
+            .unwrap()
+            .last_mut()
+            .unwrap()
+            .insert(name, val);
+        Ok(())
+    }
+
+    fn cvar_declare(&self, name: String, ty: &Ty) -> Result<(), String> {
+        self.cvar_declare_init(name, ty, ty.default())
+    }
+
+    fn crets_push(&self, ret: Option<T>) {
+        self.crets_stack.borrow_mut().push(ret)
+    }
+
+    fn crets_pop(&self) -> Option<T> {
+        assert!(!self.crets_stack.borrow().is_empty());
+        self.crets_stack.borrow_mut().pop().unwrap()
     }
 
     fn const_type_(&self, c: &ast::ConstantDefinition<'ast>) -> Ty {
@@ -1107,6 +1186,7 @@ impl<'ast> ZGen<'ast> {
         }
     }
 
+    // XXX(rsw) FIXME need const_type_ that doesn't call self.expr() !!!
     fn type_(&self, t: &ast::Type<'ast>) -> Ty {
         fn lift<'ast>(t: &ast::BasicOrStructType<'ast>) -> ast::Type<'ast> {
             match t {
@@ -1146,46 +1226,6 @@ impl<'ast> ZGen<'ast> {
                 ty
             }
         }
-    }
-
-    fn flatten_import_map(&mut self) {
-        // create a new map
-        let mut new_map = HashMap::with_capacity(self.import_map.len());
-        self.import_map.keys().for_each(|k| {
-            new_map.insert(k.clone(), HashMap::new());
-        });
-
-        let mut visited = Vec::new();
-        for (fname, map) in &self.import_map {
-            for (iname, (nv, iv)) in map.iter() {
-                // unwrap is safe because of new_map's initialization above
-                if new_map.get(fname).unwrap().contains_key(iname) {
-                    // visited this value already as part of a prior pointer chase
-                    continue;
-                }
-
-                // chase the pointer, writing down every visited key along the way
-                visited.clear();
-                visited.push((fname, iname));
-                let mut n = nv;
-                let mut i = iv;
-                while let Some((nn, ii)) = self.import_map.get(n).and_then(|m| m.get(i)) {
-                    visited.push((n, i));
-                    n = nn;
-                    i = ii;
-                }
-
-                // map every visited key to the final value in the ptr chase
-                visited.iter().for_each(|&(nn, ii)| {
-                    new_map
-                        .get_mut(nn)
-                        .unwrap()
-                        .insert(ii.clone(), (n.clone(), i.clone()));
-                });
-            }
-        }
-
-        self.import_map = new_map;
     }
 
     fn visit_files(&mut self) {
@@ -1292,6 +1332,46 @@ impl<'ast> ZGen<'ast> {
             .collect()
     }
 
+    fn flatten_import_map(&mut self) {
+        // create a new map
+        let mut new_map = HashMap::with_capacity(self.import_map.len());
+        self.import_map.keys().for_each(|k| {
+            new_map.insert(k.clone(), HashMap::new());
+        });
+
+        let mut visited = Vec::new();
+        for (fname, map) in &self.import_map {
+            for (iname, (nv, iv)) in map.iter() {
+                // unwrap is safe because of new_map's initialization above
+                if new_map.get(fname).unwrap().contains_key(iname) {
+                    // visited this value already as part of a prior pointer chase
+                    continue;
+                }
+
+                // chase the pointer, writing down every visited key along the way
+                visited.clear();
+                visited.push((fname, iname));
+                let mut n = nv;
+                let mut i = iv;
+                while let Some((nn, ii)) = self.import_map.get(n).and_then(|m| m.get(i)) {
+                    visited.push((n, i));
+                    n = nn;
+                    i = ii;
+                }
+
+                // map every visited key to the final value in the ptr chase
+                visited.iter().for_each(|&(nn, ii)| {
+                    new_map
+                        .get_mut(nn)
+                        .unwrap()
+                        .insert(ii.clone(), (n.clone(), i.clone()));
+                });
+            }
+        }
+
+        self.import_map = new_map;
+    }
+
     fn visit_declarations(&mut self, files: Vec<PathBuf>) {
         let mut t = std::mem::take(&mut self.asts);
         let mut clr = ZConstLiteralRewriter::new(None);
@@ -1314,7 +1394,10 @@ impl<'ast> ZGen<'ast> {
                         clr.visit_struct_definition(&mut s_ast)
                             .unwrap_or_else(|e| self.err(e.0, &s.span));
 
-                        self.insert_struct(&s.id.value, s_ast);
+                        self.structs
+                            .get_mut(self.file_stack.borrow().last().unwrap())
+                            .unwrap()
+                            .insert(s.id.value.clone(), s_ast);
                     }
                     ast::SymbolDeclaration::Function(f) => {
                         debug!("processing decl: fn {} in {}", f.id.value, p.display());
@@ -1359,65 +1442,60 @@ impl<'ast> ZGen<'ast> {
         self.asts = t;
     }
 
-    fn get_struct(&self, struct_id: &str) -> Option<&ast::StructDefinition<'ast>> {
-        let (s_path, s_name) = self.deref_import(struct_id);
-        self.structs.get(&s_path).and_then(|m| m.get(&s_name))
-    }
-
     fn get_function(&self, fn_id: &str) -> Option<&ast::FunctionDefinition<'ast>> {
         let (f_path, f_name) = self.deref_import(fn_id);
         self.functions.get(&f_path).and_then(|m| m.get(&f_name))
     }
 
-    /*
-    fn struct_defined(&self, struct_id: &str) -> bool {
+    fn get_struct(&self, struct_id: &str) -> Option<&ast::StructDefinition<'ast>> {
         let (s_path, s_name) = self.deref_import(struct_id);
-        self.structs
-            .get(&s_path)
-            .map(|m| m.contains_key(&s_name))
-            .unwrap_or(false)
+        self.structs.get(&s_path).and_then(|m| m.get(&s_name))
     }
-    */
 
-    /*
-    fn get_struct_mut(&mut self, struct_id: &str) -> Option<&mut ast::StructDefinition<'ast>> {
-        let (s_path, s_name) = self.deref_import(struct_id);
-        self.structs
-            .get_mut(&s_path)
-            .and_then(|m| m.get_mut(&s_name))
+    /*** circify wrapper functions (hides RefCell) ***/
+
+    fn circ_assert(&self, asrt: Term) {
+        self.circ.borrow_mut().assert(asrt)
     }
-    */
 
-    /*
-    fn get_str_ty(&self, struct_id: &str) -> Option<&Ty> {
-        let (s_path, s_name) = self.deref_import(struct_id);
-        self.str_tys.get(&s_path).and_then(|m| m.get(&s_name))
+    fn circ_return_(&self, ret: Option<T>) -> Result<(), CircError> {
+        self.circ.borrow_mut().return_(ret)
     }
-    */
 
-    /*
-    fn insert_str_ty(
-        &mut self,
-        id: &str,
-        ty: Ty,
-    ) -> Option<Ty> {
-        let (s_path, s_name) = self.deref_import(id);
-        self.str_tys
-            .get_mut(&s_path)
-            .unwrap()
-            .insert(s_name, ty)
+    fn circ_enter_fn(&self, f_name: String, ret_ty: Option<Ty>) {
+        self.circ.borrow_mut().enter_fn(f_name, ret_ty)
     }
-    */
 
-    fn insert_struct(
-        &mut self,
-        id: &str,
-        def: ast::StructDefinition<'ast>,
-    ) -> Option<ast::StructDefinition<'ast>> {
-        self.structs
-            .get_mut(self.file_stack.borrow().last().unwrap())
-            .unwrap()
-            .insert(id.to_string(), def)
+    fn circ_exit_fn(&self) -> Option<Val<T>> {
+        self.circ.borrow_mut().exit_fn()
+    }
+
+    fn circ_enter_scope(&self) {
+        self.circ.borrow_mut().enter_scope()
+    }
+
+    fn circ_exit_scope(&self) {
+        self.circ.borrow_mut().exit_scope()
+    }
+
+    fn circ_declare(&self, name: String, ty: &Ty, input: bool, vis: Option<PartyId>) -> Result<(), CircError> {
+        self.circ.borrow_mut().declare(name, ty, input, vis)
+    }
+
+    fn circ_declare_init(&self, name: String, ty: Ty, val: Val<T>) -> Result<Val<T>, CircError> {
+        self.circ.borrow_mut().declare_init(name, ty, val)
+    }
+
+    fn circ_get_value(&self, loc: Loc) -> Result<Val<T>, CircError> {
+        self.circ.borrow().get_value(loc)
+    }
+
+    fn circ_assign(&self, loc: Loc, val: Val<T>) -> Result<Val<T>, CircError> {
+        self.circ.borrow_mut().assign(loc, val)
+    }
+
+    fn circ_assign_with_assertions(&self, name: String, term: T, ty: &Ty, vis: Option<PartyId>) {
+        self.circ.borrow_mut().assign_with_assertions(name, term, ty, vis)
     }
 }
 
