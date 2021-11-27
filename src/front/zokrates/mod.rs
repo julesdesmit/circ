@@ -866,6 +866,91 @@ impl<'ast> ZGen<'ast> {
         }
     }
 
+    fn const_stmt_(&self, s: &ast::Statement<'ast>) -> Result<(), String> {
+        debug!("Const stmt: {}", s.span().as_str());
+        match s {
+            ast::Statement::Return(r) => {
+                // XXX(unimpl) multi-return unimplemented
+                assert!(r.expressions.len() <= 1);
+                if let Some(e) = r.expressions.first() {
+                    let ret = self.const_expr_(e)?;
+                    // return ret
+                } else {
+                    // return None
+                }
+                Ok(())
+            }
+            ast::Statement::Assertion(e) => {
+                if self.const_expr_(&e.expression)
+                    .and_then(|b| const_bool_ref(&b))
+                    .or_else(|err| Err(format!(
+                        "Const bool expression {} eval failed: {}",
+                        span_to_string(e.expression.span()),
+                        err,
+                    )))? {
+                    Ok(())
+                } else {
+                    Err(format!("Const assert failed:\n{}", span_to_string(s.span())))
+                }
+            }
+            ast::Statement::Iteration(i) => {
+                let ty = self.type_(&i.ty);
+                let ival_cons = match ty {
+                    Ty::Field => T::new_field,
+                    Ty::Uint(8) => T::new_u8,
+                    Ty::Uint(16) => T::new_u16,
+                    Ty::Uint(32) => T::new_u32,
+                    Ty::Uint(64) => T::new_u64,
+                    _ => { return Err(format!("Iteration variable must be Field or Uint, got {:?}", ty)); }
+                };
+
+                let s = self.const_usize_r_(&i.from)?;
+                let e = self.const_usize_r_(&i.to)?;
+                let v_name = i.index.value.clone();
+                // enter scope
+                // declare v_name
+                for j in s..e {
+                    // enter scope
+                    // assign v_name = j
+                    for s in &i.statements {
+                        self.const_stmt_(s)?;
+                    }
+                    // exit scope
+                }
+                // exit scope
+                Ok(())
+            }
+            ast::Statement::Definition(d) => {
+                // XXX(unimpl) multi-assignment unimplemented
+                assert!(d.lhs.len() <= 1);
+                let e = self.expr(&d.expression);
+                if let Some(l) = d.lhs.first() {
+                    let ty = e.type_();
+                    match l {
+                        ast::TypedIdentifierOrAssignee::Assignee(l) => {
+                            // find the in-scope identifier with this name
+                            // check the type and assign
+                            Ok(())
+                        }
+                        ast::TypedIdentifierOrAssignee::TypedIdentifier(l) => {
+                            let decl_ty = self.type_(&l.ty);
+                            if decl_ty != ty {
+                                Err(format!(
+                                    "Const assignment type mismatch: {} annotated vs {} actual",
+                                    decl_ty, ty,
+                                ))?;
+                            }
+                            // declare variable in this scope, assign
+                            Ok(())
+                        }
+                    }
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
     fn circ_assert(&self, asrt: Term) {
         self.circ.borrow_mut().assert(asrt)
     }
@@ -1334,4 +1419,8 @@ impl<'ast> ZGen<'ast> {
             .unwrap()
             .insert(id.to_string(), def)
     }
+}
+
+fn span_to_string(span: &ast::Span) -> String {
+    span.lines().collect::<String>()
 }

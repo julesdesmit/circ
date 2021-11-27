@@ -10,15 +10,11 @@ use zexprtyper::ZExpressionTyper;
 use super::walkfns::*;
 use super::{ZConstLiteralRewriter, ZVisitorMut, ZVisitorError, ZVisitorResult, ZResult};
 use super::super::term::{const_int, const_int_ref, Ty};
-use super::super::ZGen;
+use super::super::{ZGen, span_to_string};
 
 use log::debug;
 use std::collections::HashMap;
 use zokrates_pest_ast as ast;
-
-fn span_to_string(span: &ast::Span) -> String {
-    span.lines().collect::<String>()
-}
 
 fn bos_to_type<'ast>(bos: ast::BasicOrStructType<'ast>) -> ast::Type<'ast> {
     use ast::{BasicOrStructType::*, Type};
