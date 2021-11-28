@@ -547,7 +547,7 @@ impl<'ast> ZGen<'ast> {
             ast::Expression::ArrayInitializer(a) => {
                 let v = self.expr(&a.value);
                 let ty = v.type_();
-                let n = self.const_int(&a.count) as usize;
+                let n = self.const_usize(&a.count);
                 Ok(T::Array(ty, vec![v; n]))
             }
             ast::Expression::Postfix(p) => {
@@ -580,8 +580,8 @@ impl<'ast> ZGen<'ast> {
                     ast::Access::Select(a) => match &a.expression {
                         ast::RangeOrExpression::Expression(e) => array_select(b?, self.expr(e)),
                         ast::RangeOrExpression::Range(r) => {
-                            let s = r.from.as_ref().map(|s| self.const_int(&s.0) as usize);
-                            let e = r.to.as_ref().map(|s| self.const_int(&s.0) as usize);
+                            let s = r.from.as_ref().map(|s| self.const_usize(&s.0));
+                            let e = r.to.as_ref().map(|s| self.const_usize(&s.0));
                             slice(b?, s, e)
                         }
                     },
@@ -791,6 +791,10 @@ impl<'ast> ZGen<'ast> {
         self.unwrap(i, e.span()).to_isize().unwrap()
     }
 
+    fn const_usize(&self, e: &ast::Expression<'ast>) -> usize {
+        self.unwrap(const_int(self.expr(e)), e.span()).to_usize().unwrap()
+    }
+
     fn generic_lookup_(&self, i: &str) -> Option<T> {
         self.generics_stack.borrow().last().and_then(|m| m.get(i)).cloned()
     }
@@ -954,7 +958,7 @@ impl<'ast> ZGen<'ast> {
             self.generics_stack_push(generics, f.generics);
             self.cvar_enter_function();
             for (p, a) in f.parameters.into_iter().zip(args) {
-                let ty = self.type_(&p.ty);
+                let ty = self.const_type_(&p.ty);
                 self.cvar_declare_init(p.id.value, &ty, a)?;
             }
             for s in &f.statements {
@@ -998,7 +1002,7 @@ impl<'ast> ZGen<'ast> {
                 }
             }
             ast::Statement::Iteration(i) => {
-                let ty = self.type_(&i.ty);
+                let ty = self.const_type_(&i.ty);
                 let ival_cons = match ty {
                     Ty::Field => T::new_field,
                     Ty::Uint(8) => T::new_u8,
@@ -1035,7 +1039,7 @@ impl<'ast> ZGen<'ast> {
                             self.cvar_assign(&l.id.value, l.accesses.as_ref(), e)
                         }
                         ast::TypedIdentifierOrAssignee::TypedIdentifier(l) => {
-                            let decl_ty = self.type_(&l.ty);
+                            let decl_ty = self.const_type_(&l.ty);
                             if decl_ty != ty {
                                 Err(format!(
                                     "Const assignment type mismatch: {} annotated vs {} actual",
@@ -1140,32 +1144,6 @@ impl<'ast> ZGen<'ast> {
         self.crets_stack.borrow_mut().pop().unwrap()
     }
 
-    fn const_type_(&self, c: &ast::ConstantDefinition<'ast>) -> Ty {
-        // XXX(unimpl) consts must be Basic or Array type
-        match &c.ty {
-            ast::Type::Basic(ast::BasicType::U8(_)) => Ty::Uint(8),
-            ast::Type::Basic(ast::BasicType::U16(_)) => Ty::Uint(16),
-            ast::Type::Basic(ast::BasicType::U32(_)) => Ty::Uint(32),
-            ast::Type::Basic(ast::BasicType::U64(_)) => Ty::Uint(64),
-            ast::Type::Basic(ast::BasicType::Boolean(_)) => Ty::Bool,
-            ast::Type::Basic(ast::BasicType::Field(_)) => Ty::Field,
-            ast::Type::Array(a) => {
-                let b = if let ast::BasicOrStructType::Basic(b) = &a.ty {
-                    let tmp = ast::Type::Basic(b.clone());
-                    self.type_(&tmp)
-                } else {
-                    self.err("Struct consts not supported", &a.span)
-                };
-                a.dimensions
-                    .iter()
-                    .rev()
-                    .map(|d| self.const_usize_(d))
-                    .fold(b, |b, d| Ty::Array(d, Box::new(b)))
-            }
-            ast::Type::Struct(_) => self.err("Struct consts not supported", &c.span),
-        }
-    }
-
     fn const_decl_(&mut self, c: &mut ast::ConstantDefinition<'ast>) {
         // make sure that this wasn't already an important const name
         if self.cur_import_map()
@@ -1179,7 +1157,7 @@ impl<'ast> ZGen<'ast> {
         }
 
         // handle literal type inference using declared type
-        let ctype = self.const_type_(&c);
+        let ctype = self.const_type_(&c.ty);
         let mut v = ZConstLiteralRewriter::new(Some(ctype.clone()));
         v.visit_expression(&mut c.expression)
             .unwrap_or_else(|e| self.err(e.0, &c.span));
@@ -1204,8 +1182,15 @@ impl<'ast> ZGen<'ast> {
         }
     }
 
-    // XXX(rsw) FIXME need const_type_ that doesn't call self.expr() !!!
     fn type_(&self, t: &ast::Type<'ast>) -> Ty {
+        self.type_impl_::<false>(t)
+    }
+
+    fn const_type_(&self, t: &ast::Type<'ast>) -> Ty {
+        self.type_impl_::<true>(t)
+    }
+
+    fn type_impl_<const IS_CNST: bool>(&self, t: &ast::Type<'ast>) -> Ty {
         fn lift<'ast>(t: &ast::BasicOrStructType<'ast>) -> ast::Type<'ast> {
             match t {
                 ast::BasicOrStructType::Basic(b) => ast::Type::Basic(b.clone()),
@@ -1220,11 +1205,12 @@ impl<'ast> ZGen<'ast> {
             ast::Type::Basic(ast::BasicType::Boolean(_)) => Ty::Bool,
             ast::Type::Basic(ast::BasicType::Field(_)) => Ty::Field,
             ast::Type::Array(a) => {
-                let b = self.type_(&lift(&a.ty));
+                let b = self.type_impl_::<IS_CNST>(&lift(&a.ty));
+                let f = if IS_CNST { Self::const_usize_ } else { Self::const_usize };
                 a.dimensions
                     .iter()
                     .rev()
-                    .map(|d| self.const_int(d))
+                    .map(|d| f(self, d))
                     .fold(b, |b, d| Ty::Array(d as usize, Box::new(b)))
             }
             ast::Type::Struct(s) => {
@@ -1238,7 +1224,7 @@ impl<'ast> ZGen<'ast> {
                 self.generics_stack_push(generics, sdef.generics);
                 let ty = Ty::Struct(
                     s.id.value.clone(),
-                    sdef.fields.into_iter().map(|f| (f.id.value, self.type_(&f.ty))).collect()
+                    sdef.fields.into_iter().map(|f| (f.id.value, self.type_impl_::<IS_CNST>(&f.ty))).collect()
                 );
                 self.generics_stack_pop();
                 ty
