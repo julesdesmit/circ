@@ -1015,7 +1015,7 @@ impl<'ast> ZGen<'ast> {
                 self.cvar_declare(v_name, &ty)?;
                 for j in s..e {
                     self.cvar_enter_scope();
-                    self.cvar_assign(&i.index.value, ival_cons(j))?;
+                    self.cvar_assign(&i.index.value, &[][..], ival_cons(j))?;
                     for s in &i.statements {
                         self.const_stmt_(s)?;
                     }
@@ -1032,10 +1032,7 @@ impl<'ast> ZGen<'ast> {
                     let ty = e.type_();
                     match l {
                         ast::TypedIdentifierOrAssignee::Assignee(l) => {
-                            // TODO find the in-scope identifier with this name
-                            // TODO check the type
-                            // TODO assign
-                            Ok(())
+                            self.cvar_assign(&l.id.value, l.accesses.as_ref(), e)
                         }
                         ast::TypedIdentifierOrAssignee::TypedIdentifier(l) => {
                             let decl_ty = self.type_(&l.ty);
@@ -1075,11 +1072,32 @@ impl<'ast> ZGen<'ast> {
         self.cvars_stack.borrow_mut().pop();
     }
 
-    fn cvar_assign(&self, name: &str, val: T) -> Result<(), String> {
+    fn cvar_assign(&self, name: &str, accs: &[ast::AssigneeAccess<'ast>], val: T) -> Result<(), String> {
         assert!(!self.cvars_stack.borrow().last().unwrap().is_empty());
         match self.cvars_stack.borrow_mut().last_mut().unwrap().iter_mut().rev().find_map(|v| v.get_mut(name)) {
             None => Err(format!("Const assign failed: no variable {} in scope", name)),
-            Some(old_val) => {
+            Some(mut old_val) => {
+                // walk accesses to compute pointer to value being updated
+                for acc in accs {
+                    match acc {
+                        ast::AssigneeAccess::Select(a) => {
+                            let idx = match &a.expression {
+                                ast::RangeOrExpression::Range(_) => Err("cvar_assign cannot assign to Range".to_string()),
+                                ast::RangeOrExpression::Expression(e) => self.const_usize_r_(e),
+                            }?;
+                            old_val = match old_val {
+                                T::Array(_, v) => v.get_mut(idx).ok_or_else(|| format!("Tried to access idx {}, which was out of bounds", idx)),
+                                _ => Err(format!("Tried to index into non-Array type {}", old_val.type_())),
+                            }?;
+                        }
+                        ast::AssigneeAccess::Member(a) => {
+                            old_val = match old_val {
+                                T::Struct(_, m) => m.get_mut(&a.id.value).ok_or_else(|| format!("No field '{}' accessing const struct", &a.id.value)),
+                                _ => Err(format!("Tried to access member '{}' in non-Struct type", &a.id.value)),
+                            }?;
+                        }
+                    }
+                }
                 if old_val.type_() != val.type_() {
                     Err(format!(
                         "Const assign type mismatch: got {}, expected {}",
