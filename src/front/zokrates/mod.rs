@@ -826,6 +826,7 @@ impl<'ast> ZGen<'ast> {
     fn const_identifier_(&self, i: &ast::IdentifierExpression<'ast>) -> Result<T, String> {
         self.generic_lookup_(i.value.as_ref())
             .or_else(|| self.const_lookup_(i.value.as_ref()).cloned())
+            .or_else(|| self.cvar_lookup(i.value.as_ref()))
             .ok_or_else(|| format!("Undefined const identifier {}", &i.value))
     }
 
@@ -1078,26 +1079,34 @@ impl<'ast> ZGen<'ast> {
 
     fn cvar_assign(&self, name: &str, accs: &[ast::AssigneeAccess<'ast>], val: T) -> Result<(), String> {
         assert!(!self.cvars_stack.borrow().last().unwrap().is_empty());
+
+        // compute path to updated value before borrowing cvars_stack (because
+        // we might need to evaluate expressions while walking the accesses)
+        let mut cvmsaccs = Vec::with_capacity(accs.len());
+        accs.iter().try_for_each(|acc| match acc {
+            ast::AssigneeAccess::Select(a) => match &a.expression {
+                ast::RangeOrExpression::Range(_) => Err("cvar_assign cannot assign to Range".to_string()),
+                ast::RangeOrExpression::Expression(e) => Ok(cvmsaccs.push(CVMSAcc::Sel(self.const_usize_r_(e)?))),
+            },
+            ast::AssigneeAccess::Member(a) => Ok(cvmsaccs.push(CVMSAcc::Mem(&a.id.value))),
+        })?;
+
         match self.cvars_stack.borrow_mut().last_mut().unwrap().iter_mut().rev().find_map(|v| v.get_mut(name)) {
             None => Err(format!("Const assign failed: no variable {} in scope", name)),
             Some(mut old_val) => {
-                // walk accesses to compute pointer to value being updated
-                for acc in accs {
+                // walk previously computed accesses
+                for acc in cvmsaccs.into_iter() {
                     match acc {
-                        ast::AssigneeAccess::Select(a) => {
-                            let idx = match &a.expression {
-                                ast::RangeOrExpression::Range(_) => Err("cvar_assign cannot assign to Range".to_string()),
-                                ast::RangeOrExpression::Expression(e) => self.const_usize_r_(e),
-                            }?;
+                        CVMSAcc::Sel(idx) => {
                             old_val = match old_val {
                                 T::Array(_, v) => v.get_mut(idx).ok_or_else(|| format!("Tried to access idx {}, which was out of bounds", idx)),
                                 _ => Err(format!("Tried to index into non-Array type {}", old_val.type_())),
                             }?;
                         }
-                        ast::AssigneeAccess::Member(a) => {
+                        CVMSAcc::Mem(name) => {
                             old_val = match old_val {
-                                T::Struct(_, m) => m.get_mut(&a.id.value).ok_or_else(|| format!("No field '{}' accessing const struct", &a.id.value)),
-                                _ => Err(format!("Tried to access member '{}' in non-Struct type", &a.id.value)),
+                                T::Struct(_, m) => m.get_mut(name).ok_or_else(|| format!("No field '{}' accessing const struct", name)),
+                                _ => Err(format!("Tried to access member '{}' in non-Struct type", name)),
                             }?;
                         }
                     }
@@ -1133,6 +1142,14 @@ impl<'ast> ZGen<'ast> {
 
     fn cvar_declare(&self, name: String, ty: &Ty) -> Result<(), String> {
         self.cvar_declare_init(name, ty, ty.default())
+    }
+
+    fn cvar_lookup(&self, name: &str) -> Option<T> {
+        if let Some(st) = self.cvars_stack.borrow().last() {
+            st.iter().rev().find_map(|v| v.get(name).cloned())
+        } else {
+            None
+        }
     }
 
     fn crets_push(&self, ret: Option<T>) {
@@ -1505,4 +1522,9 @@ impl<'ast> ZGen<'ast> {
 
 fn span_to_string(span: &ast::Span) -> String {
     span.lines().collect::<String>()
+}
+
+enum CVMSAcc<'t> {
+    Sel(usize),
+    Mem(&'t str),
 }
