@@ -922,7 +922,7 @@ impl<'ast> ZGen<'ast> {
             }
             ast::Expression::Postfix(p) => {
                 assert!(p.accesses.len() > 0);
-                let (arr, acc) = if let Some(ast::Access::Call(c)) = p.accesses.first() {
+                let (mut arr, accs) = if let Some(ast::Access::Call(c)) = p.accesses.first() {
                     let (f_path, f_name) = self.deref_import(&p.id.value);
                     debug!("Const call: {} {:?} {:?}", p.id.value, f_path, f_name);
                     let args = c
@@ -932,29 +932,47 @@ impl<'ast> ZGen<'ast> {
                         .map(|e| self.const_expr_(e))
                         .collect::<Result<Vec<_>, _>>()?;
                     let generics = self.explicit_generic_values(c.explicit_generics.as_ref());
-                    let res = self.const_function_call_(args, generics, f_path, f_name)?;
-                    (res, &p.accesses[1..])
+                    (self.const_function_call_(args, generics, f_path, f_name)?, &p.accesses[1..])
                 } else {
                     (self.const_identifier_(&p.id)?, &p.accesses[..])
                 };
-
-                acc.iter().fold(Ok(arr), |arr, acc| match acc {
-                    ast::Access::Call(_) => Err(
-                        "Function call in non-first-acc position in const expr".to_string(),
-                    ),
-                    // XXX(unimpl) Member not supported (because const Structs not supported)
-                    ast::Access::Member(_) => Err(
-                        "Struct member accesses not supported in const definitions".to_string(),
-                    ),
-                    ast::Access::Select(s) => match &s.expression {
-                        ast::RangeOrExpression::Expression(e) => array_select(arr?, self.const_expr_(e)?),
-                        ast::RangeOrExpression::Range(r) => {
-                            let start = r.from.as_ref().map(|s| self.const_usize_r_(&s.0)).transpose()?;
-                            let end = r.to.as_ref().map(|s| self.const_usize_r_(&s.0)).transpose()?;
-                            slice(arr?, start, end)
+                for acc in accs.into_iter() {
+                    match acc {
+                        ast::Access::Call(_) => Err("Function call in non-first-acc position in const expr".to_string())?,
+                        ast::Access::Member(a) => {
+                            arr = match arr {
+                                T::Struct(ty, mut m) => m.remove(&a.id.value)
+                                    .ok_or_else(|| format!("No field '{}' accessing const struct of type {:?}", &a.id.value, ty)),
+                                x => Err(format!("Tried to access member of non-Struct type {}", x.type_())),
+                            }?;
                         }
-                    },
-                })
+                        ast::Access::Select(s) => {
+                            arr = match arr {
+                                T::Array(ty, mut v) => match &s.expression {
+                                    ast::RangeOrExpression::Expression(e) => {
+                                        let idx = self.const_usize_r_(e)?;
+                                        if v.len() > idx {
+                                            Ok(v.swap_remove(idx))
+                                        } else {
+                                            Err(format!("Out-of-bounds array access: wanted {}, but len was {}", idx, v.len()))
+                                        }
+                                    }
+                                    ast::RangeOrExpression::Range(r) => {
+                                        let start = r.from.as_ref().map(|s| self.const_usize_r_(&s.0)).transpose()?.unwrap_or(0);
+                                        let end = r.to.as_ref().map(|s| self.const_usize_r_(&s.0)).transpose()?.unwrap_or(v.len());
+                                        if start > end || end > v.len() {
+                                            Err(format!("Got bad range {}..{} for vec of length {}", start, end, v.len()))
+                                        } else {
+                                            Ok(T::Array(ty, v.drain(start..end).collect()))
+                                        }
+                                    }
+                                }
+                                x => Err(format!("Tried to index into non-Array type {}", x.type_())),
+                            }?;
+                        }
+                    }
+                }
+                Ok(arr)
             }
             ast::Expression::InlineStruct(_) => Err("Struct constants not supported".to_string()),
         }
