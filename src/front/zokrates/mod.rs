@@ -96,7 +96,7 @@ impl FrontEnd for Zokrates {
 
 impl Zokrates {
     /// Execute the ZoKrates front-end interpreter on the supplied file with the supplied inputs
-    pub fn interpret(i: Inputs) -> Option<T> {
+    pub fn interpret(i: Inputs) -> T {
         if i.inputs.is_some() {
             panic!("Zokrates::interpret() requires main() to take no args");
         }
@@ -657,11 +657,21 @@ impl<'ast> ZGen<'ast> {
         }
     }
 
-    fn const_entry_fn(&self, n: &str) -> Option<T> {
+    fn const_entry_fn(&self, n: &str) -> T {
         debug!("Const entry: {}", n);
         let (f_file, f_name) = self.deref_import(n);
+        if let Some(f) = self.functions.get(&f_file).and_then(|m| m.get(&f_name)) {
+            if !f.generics.is_empty() {
+                panic!("const_entry_fn cannot be called on a generic function")
+            } else if !f.parameters.is_empty() {
+                panic!("const_entry_fn must be called on a function with zero arguments")
+            }
+        } else {
+            panic!("No function '{:?}//{}' attempting const_entry_fn", &f_file, &f_name);
+        }
 
-        None
+        self.const_function_call_(Vec::new(), Vec::new(), f_file, f_name)
+            .unwrap_or_else(|e| panic!("const_entry_fn failed: {}", e))
     }
 
     fn entry_fn(&self, n: &str) {
@@ -885,16 +895,13 @@ impl<'ast> ZGen<'ast> {
             ast::Expression::Binary(b) => {
                 let left = self.const_expr_(&b.left)?;
                 let right = self.const_expr_(&b.right)?;
-                if left.type_() != right.type_() {
-                    return Err("Type mismatch in const-def binop".to_string());
-                }
                 let op = self.bin_op(&b.op);
-                op(left, right)
+                op(left, right).and_then(|res| const_val(res))
             }
             ast::Expression::Unary(u) => {
                 let arg = self.const_expr_(&u.expression)?;
                 let op = self.unary_op(&u.op);
-                op(arg)
+                op(arg).and_then(|res| const_val(res))
             }
             ast::Expression::Identifier(i) => self.const_identifier_(i),
             ast::Expression::Literal(l) => self.literal_(l),

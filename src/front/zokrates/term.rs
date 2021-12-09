@@ -175,8 +175,8 @@ impl Display for T {
             T::Bool(x) => write!(f, "Bool({})", x),
             T::Uint(s, x) => write!(f, "Uint{}({})", s, x),
             T::Field(x) => write!(f, "Field({})", x),
-            T::Struct(sn, _) => write!(f, "struct({})", sn),
-            T::Array(_, _) => write!(f, "array({})", self.type_()),
+            T::Struct(sn, d) => write!(f, "struct({}) {:?}", sn, d),
+            T::Array(_, v) => write!(f, "array({}) {:?}", self.type_(), v),
         }
     }
 }
@@ -427,6 +427,7 @@ pub fn not(a: T) -> Result<T, String> {
     wrap_un_op("!", Some(not_uint), None, Some(not_bool), a)
 }
 
+
 pub fn const_bool_ref(a: &T) -> Result<bool, String> {
     let s = match a {
         T::Bool(b) => {
@@ -464,6 +465,34 @@ pub fn const_int_ref(a: &T) -> Result<Integer, String> {
 
 pub fn const_int(a: T) -> Result<Integer, String> {
     const_int_ref(&a)
+}
+
+pub fn const_val(a: T) -> Result<T, String> {
+    match &a {
+        T::Field(b) => {
+            let folded = constant_fold(b);
+            match &folded.op {
+                Op::Const(_) => Some(T::Field(folded)),
+                _ => None,
+            }
+        }
+        T::Uint(d, i) => {
+            let folded = constant_fold(i);
+            match &folded.op {
+                Op::Const(_) => Some(T::Uint(*d, folded)),
+                _ => None,
+            }
+        }
+        T::Bool(b) => {
+            let folded = constant_fold(b);
+            match &folded.op {
+                Op::Const(_) => Some(T::Bool(folded)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+    .ok_or_else(|| format!("{} is not a constant basic type", a))
 }
 
 pub fn bool(a: T) -> Result<Term, String> {
