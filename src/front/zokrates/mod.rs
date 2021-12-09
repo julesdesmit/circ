@@ -94,6 +94,23 @@ impl FrontEnd for Zokrates {
     }
 }
 
+impl Zokrates {
+    /// Execute the ZoKrates front-end interpreter on the supplied file with the supplied inputs
+    pub fn interpret(i: Inputs) -> Option<T> {
+        if i.inputs.is_some() {
+            panic!("Zokrates::interpret() requires main() to take no args");
+        }
+
+        let loader = parser::ZLoad::new();
+        let asts = loader.load(&i.file);
+        let mut g = ZGen::new(i.inputs, asts, i.mode);
+        g.visit_files();
+        g.file_stack_push(i.file);
+        g.generics_stack_push(Vec::new(), Vec::new());
+        g.const_entry_fn("main")
+    }
+}
+
 struct ZGen<'ast> {
     circ: RefCell<Circify<ZoKrates>>,
     stdlib: parser::ZStdLib,
@@ -638,6 +655,13 @@ impl<'ast> ZGen<'ast> {
             self.file_stack_pop();
             Ok(ret)
         }
+    }
+
+    fn const_entry_fn(&self, n: &str) -> Option<T> {
+        debug!("Const entry: {}", n);
+        let (f_file, f_name) = self.deref_import(n);
+
+        None
     }
 
     fn entry_fn(&self, n: &str) {
