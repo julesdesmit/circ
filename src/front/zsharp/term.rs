@@ -1,4 +1,4 @@
-//! Symbolic ZoKrates terms
+//! Symbolic Z# terms
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
@@ -13,14 +13,14 @@ use crate::ir::term::*;
 
 lazy_static! {
     // TODO: handle this better
-    /// The modulus for ZoKrates.
-    pub static ref ZOKRATES_MODULUS: Integer = Integer::from_str_radix(
+    /// The modulus for Z#.
+    pub static ref ZSHARP_MODULUS: Integer = Integer::from_str_radix(
         "52435875175126190479447740508185965837690552500527637822603658699938581184513",
         10
     )
     .unwrap();
-    /// The modulus for ZoKrates, as an ARC
-    pub static ref ZOKRATES_MODULUS_ARC: Arc<Integer> = Arc::new(ZOKRATES_MODULUS.clone());
+    /// The modulus for Z#, as an ARC
+    pub static ref ZSHARP_MODULUS_ARC: Arc<Integer> = Arc::new(ZSHARP_MODULUS.clone());
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -556,7 +556,7 @@ where
 {
     leaf_term(Op::Const(Value::Field(FieldElem::new(
         Integer::from(i),
-        ZOKRATES_MODULUS_ARC.clone(),
+        ZSHARP_MODULUS_ARC.clone(),
     ))))
 }
 
@@ -603,7 +603,7 @@ pub fn array_select(array: T, idx: T) -> Result<T, String> {
     // XXX(rsw) should we actually allow indexing with both Field and u*?
     let idx = match idx {
         T::Field(idx) => {
-            warn!("ZoKrates front-end indexes array with Field type");
+            warn!("Z# front-end indexes array with Field type");
             Ok(idx)
         }
         T::Uint(_, idx) => Ok(idx),
@@ -626,7 +626,7 @@ pub fn array_store(array: T, idx: T, val: T) -> Result<T, String> {
     // XXX(rsw) should we actually allow indexing with both Field and u*?
     let idx = match idx {
         T::Field(idx) => {
-            warn!("ZoKrates front-end indexes array with Field type");
+            warn!("Z# front-end indexes array with Field type");
             Ok(idx)
         }
         T::Uint(_, idx) => Ok(idx),
@@ -722,7 +722,7 @@ pub fn bit_array_le(a: T, b: T, n: usize) -> Result<T, String> {
     }
 }
 
-pub struct ZoKrates {
+pub struct ZSharp {
     values: Option<HashMap<String, Integer>>,
     modulus: Arc<Integer>,
 }
@@ -735,16 +735,16 @@ fn idx_name(struct_name: &str, idx: usize) -> String {
     format!("{}.{}", struct_name, idx)
 }
 
-impl ZoKrates {
+impl ZSharp {
     pub fn new(values: Option<HashMap<String, Integer>>) -> Self {
         Self {
             values,
-            modulus: ZOKRATES_MODULUS_ARC.clone(),
+            modulus: ZSHARP_MODULUS_ARC.clone(),
         }
     }
 }
 
-impl Embeddable for ZoKrates {
+impl Embeddable for ZSharp {
     type T = T;
     type Ty = Ty;
     fn declare(

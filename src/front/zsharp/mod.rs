@@ -1,4 +1,4 @@
-//! The ZoKrates front-end
+//! The ZoKrates/Z# front-end
 
 mod parser;
 mod term;
@@ -20,17 +20,17 @@ use zokrates_pest_ast as ast;
 use term::*;
 use zvisit::{ZConstLiteralRewriter, ZStatementWalker, ZVisitorMut};
 
-/// The modulus for the ZoKrates language.
-pub use term::ZOKRATES_MODULUS;
-/// The modulus for the ZoKrates language.
-pub use term::ZOKRATES_MODULUS_ARC;
+/// The modulus for the ZSharp language.
+pub use term::ZSHARP_MODULUS;
+/// The modulus for the ZSharp language.
+pub use term::ZSHARP_MODULUS_ARC;
 
 /// The prover visibility
 pub const PROVER_VIS: Option<PartyId> = Some(proof::PROVER_ID);
 /// Public visibility
 pub const PUBLIC_VIS: Option<PartyId> = None;
 
-/// Inputs to the ZoKrates compilier
+/// Inputs to the Z# compilier
 pub struct Inputs {
     /// The file to look for `main` in.
     pub file: PathBuf,
@@ -75,10 +75,10 @@ impl Display for Mode {
     }
 }
 
-/// The ZoKrates front-end. Implements [FrontEnd].
-pub struct Zokrates;
+/// The Z# front-end. Implements [FrontEnd].
+pub struct ZSharpFE;
 
-impl FrontEnd for Zokrates {
+impl FrontEnd for ZSharpFE {
     type Inputs = Inputs;
     fn gen(i: Inputs) -> Computation {
         let loader = parser::ZLoad::new();
@@ -94,11 +94,11 @@ impl FrontEnd for Zokrates {
     }
 }
 
-impl Zokrates {
-    /// Execute the ZoKrates front-end interpreter on the supplied file with the supplied inputs
+impl ZSharpFE {
+    /// Execute the Z# front-end interpreter on the supplied file with the supplied inputs
     pub fn interpret(i: Inputs) -> T {
         if i.inputs.is_some() {
-            panic!("Zokrates::interpret() requires main() to take no args");
+            panic!("zsharp::interpret() requires main() to take no args");
         }
 
         let loader = parser::ZLoad::new();
@@ -112,7 +112,7 @@ impl Zokrates {
 }
 
 struct ZGen<'ast> {
-    circ: RefCell<Circify<ZoKrates>>,
+    circ: RefCell<Circify<ZSharp>>,
     stdlib: parser::ZStdLib,
     asts: HashMap<PathBuf, ast::File<'ast>>,
     file_stack: RefCell<Vec<PathBuf>>,
@@ -145,7 +145,7 @@ impl ZLoc {
 impl<'ast> ZGen<'ast> {
     fn new(inputs: Option<PathBuf>, asts: HashMap<PathBuf, ast::File<'ast>>, mode: Mode) -> Self {
         let this = Self {
-            circ: RefCell::new(Circify::new(ZoKrates::new(inputs.map(|i| parser::parse_inputs(i))))),
+            circ: RefCell::new(Circify::new(ZSharp::new(inputs.map(|i| parser::parse_inputs(i))))),
             asts,
             stdlib: parser::ZStdLib::new(),
             file_stack: Default::default(),

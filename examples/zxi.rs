@@ -2,7 +2,7 @@
 use bellman::gadgets::test::TestConstraintSystem;
 use bellman::Circuit;
 use bls12_381::Scalar;
-use circ::front::zokrates::{Inputs, Mode, Zokrates};
+use circ::front::zsharp::{Inputs, Mode, ZSharpFE};
 use circ::front::FrontEnd;
 use circ::ir::opt::{opt, Opt};
 use circ::target::aby::output::write_aby_exec;
@@ -18,7 +18,7 @@ use structopt::StructOpt;
 struct Options {
     /// Input file
     #[structopt(parse(from_os_str))]
-    zokrates_path: PathBuf,
+    zsharp_path: PathBuf,
 
     /// File with input witness
     #[structopt(short, long, name = "FILE", parse(from_os_str))]
@@ -39,7 +39,6 @@ fn main() {
         .format_timestamp(None)
         .init();
     let options = Options::from_args();
-    //let path_buf = options.zokrates_path.clone();
     println!("{:?}", options);
     let mode = if options.maximize {
         Mode::Opt
@@ -50,10 +49,10 @@ fn main() {
         }
     };
     let inputs = Inputs {
-        file: options.zokrates_path,
+        file: options.zsharp_path,
         inputs: options.inputs,
         mode: mode.clone(),
     };
-    let cs = Zokrates::interpret(inputs);
+    let cs = ZSharpFE::interpret(inputs);
     println!("{:?}", cs);
 }

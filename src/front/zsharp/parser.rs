@@ -1,4 +1,4 @@
-//! Parsing and recursively loading ZoKrates.
+//! Parsing and recursively loading Z#.
 //!
 //! Based on the original ZoKrates parser, with extra machinery for recursive loading and locating
 //! the standard library.
@@ -62,7 +62,7 @@ impl ZStdLib {
                 }
             }
         }
-        panic!("Could not find ZoKrates stdlib from {}", p.display())
+        panic!("Could not find ZoKrates/Z# stdlib from {}", p.display())
     }
     /// Turn `child`, relative to `parent` (or to the standard libary!), into an absolute path.
     pub fn canonicalize(&self, parent: &Path, child: &str) -> PathBuf {
@@ -86,14 +86,14 @@ impl ZStdLib {
     }
 }
 
-/// A recrusive zokrates loader
+/// A recrusive Z# loader
 pub struct ZLoad {
     sources: Arena<String>,
     stdlib: ZStdLib,
 }
 
 impl ZLoad {
-    /// Make a new ZoKrates loader, looking for the standard library somewhere above the current
+    /// Make a new Z# loader, looking for the standard library somewhere above the current
     /// dirdirectory. See [ZStdLib::new].
     pub fn new() -> Self {
         Self {
@@ -102,7 +102,7 @@ impl ZLoad {
         }
     }
 
-    /// Recursively load a ZoKrates file.
+    /// Recursively load a Z# file.
     ///
     /// ## Returns
     ///
