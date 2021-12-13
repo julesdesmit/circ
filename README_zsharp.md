@@ -5,13 +5,16 @@ tell me about them :)
 
 ## building
 
-1. see `scripts/dependencies_*` for info on installing deps. Note that M1 macs
-   will not yet work with the homebrew instructions because the coin-or build
-   from homebrew doesn't work.
+1. see `scripts/dependencies_*` for info on installing deps.
+
+   Note that on M1 macs the homebrew instructions don't quite work, because
+   the coin-or build from homebrew is broken (for now). Don't worry---you
+   don't actually need this dep to build the zsharp interpreter.
 
 2. circ uses some experimental APIs, so you'll need rust nightly!
 
-3. To build the Z# interpreter cli, `cargo build --release --example zxi`
+3. To build the Z# interpreter cli,
+   `cargo build --release --example zxi --no-default-features`
 
 ## running
 
