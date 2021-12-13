@@ -11,7 +11,7 @@ use crate::ir::term::*;
 use log::{debug, warn};
 use rug::Integer;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Display, Formatter};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -387,7 +387,6 @@ impl<'ast> ZGen<'ast> {
                     Some(ast::DecimalSuffix::Field(_)) => {
                         Ok(T::Field(pf_lit(Integer::from_str_radix(vstr, 10).unwrap())))
                     }
-                    // XXX(unimpl) need to infer int size from context
                     _ => Err("Could not infer literal type. Annotation needed.".to_string()),
                 }
             }
@@ -683,7 +682,6 @@ impl<'ast> ZGen<'ast> {
             .clone();
         // XXX(unimpl) tuple returns not supported
         assert!(f.returns.len() <= 1);
-        // XXX(unimpl) main() cannot be generic
         if !f.generics.is_empty() {
             self.err("Entry function cannot be generic. Try adding a wrapper function that supplies an explicit generic argument.", &f.span);
         }
@@ -970,7 +968,37 @@ impl<'ast> ZGen<'ast> {
                 }
                 Ok(arr)
             }
-            ast::Expression::InlineStruct(_) => Err("Struct constants not supported".to_string()),
+            ast::Expression::InlineStruct(u) => {
+                // XXX(rsw) we do type checking here to catch bad const decls. better way?
+                let str_fields = self.get_struct(&u.ty.value)
+                    .ok_or_else(|| format!("Undefined struct type '{}' evaluating const expr", &u.ty.value))?
+                    .fields
+                    .iter()
+                    .map(|f| (&f.id.value, &f.ty))
+                    .collect::<HashMap<_,_>>();
+
+                let members = u.members.iter()
+                    .map(|m| {
+                        let d_ty = str_fields.get(&m.id.value);
+                        let m_expr = self.const_expr_(&m.expression)?;
+                        match d_ty {
+                            None => Err(format!("No such member {} in struct {}", &m.id.value, &u.ty.value)),
+                            Some(t) if self.const_type_(t) != m_expr.type_() => Err(format!("Type mismatch: struct {} member {} expected type {}, found type {}", &u.ty.value, &m.id.value, self.const_type_(t), m_expr.type_())),
+                            _ => Ok((m.id.value.clone(), m_expr)),
+                        }
+                    })
+                    .collect::<Result<BTreeMap<_,_>,_>>()?;
+
+                if members.len() == str_fields.len() {
+                    Ok(T::Struct(u.ty.value.clone(), members))
+                } else {
+                    Err(format!(
+                        "Inline expression for struct {} has extra or missing fields: {:#?}",
+                        &u.ty.value,
+                        str_fields.keys().filter(|k| !members.contains_key(k.as_str())).collect::<Vec<_>>(),
+                    ))
+                }
+            }
         }
     }
 
