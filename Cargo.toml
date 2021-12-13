@@ -44,8 +44,9 @@ structopt = "0.3"
 approx = "0.5.0"
 
 [features]
-default = ["lp"]
+default = ["lp", "bls12381"]
 lp = ["good_lp", "lp-solvers"]
+bls12381 = []
 
 [profile.release]
 debug = true
