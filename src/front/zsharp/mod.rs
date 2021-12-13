@@ -21,8 +21,6 @@ use term::*;
 use zvisit::{ZConstLiteralRewriter, ZStatementWalker, ZVisitorMut};
 
 /// The modulus for the ZSharp language.
-pub use term::ZSHARP_MODULUS;
-/// The modulus for the ZSharp language.
 pub use term::ZSHARP_MODULUS_ARC;
 
 /// The prover visibility
@@ -97,9 +95,7 @@ impl FrontEnd for ZSharpFE {
 impl ZSharpFE {
     /// Execute the Z# front-end interpreter on the supplied file with the supplied inputs
     pub fn interpret(i: Inputs) -> T {
-        if i.inputs.is_some() {
-            panic!("zsharp::interpret() requires main() to take no args");
-        }
+        i.inputs.as_ref().map(|_| panic!("zsharp::interpret() requires main() to take no args"));
 
         let loader = parser::ZLoad::new();
         let asts = loader.load(&i.file);

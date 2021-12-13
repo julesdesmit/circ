@@ -14,7 +14,7 @@ use crate::ir::term::*;
 lazy_static! {
     // TODO: handle this better
     /// The modulus for Z#.
-    pub static ref ZSHARP_MODULUS: Integer = Integer::from_str_radix(
+    static ref ZSHARP_MODULUS: Integer = Integer::from_str_radix(
         "52435875175126190479447740508185965837690552500527637822603658699938581184513",
         10
     )
