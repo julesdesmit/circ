@@ -11,18 +11,18 @@ tell me about them :)
 
 2. circ uses some experimental APIs, so you'll need rust nightly!
 
-3. To build the zok interpreter cli, `cargo build --release --example zoki`
+3. To build the Z# interpreter cli, `cargo build --release --example zxi`
 
 ## running
 
-After building as above, `target/release/examples/zoki` will have been
+After building as above, `target/release/examples/zxi` will have been
 generated. This executable takes one argument, the name of a .zok file.
 Absolute and relative paths are both OK:
 
-    target/release/examples/zoki /tmp/foo.zok
-    target/release/examples/zoki ../../path/to/somewhere/else.zok
+    target/release/examples/zxi /tmp/foo.zok
+    target/release/examples/zxi ../../path/to/somewhere/else.zok
 
 You may want to set the `RUST_LOG` environment variable to see more info
 about the typechecking and interpreting process:
 
-    RUST_LOG=debug target/release/examples/zoki /tmp/foo.zok
+    RUST_LOG=debug target/release/examples/zxi /tmp/foo.zok
