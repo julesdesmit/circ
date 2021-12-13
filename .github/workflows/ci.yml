@@ -4,7 +4,7 @@ on:
   push:
     branches: [ master, ci ]
   pull_request:
-    branches: [ master, ci ]
+    branches: [ master, ci, !zsharp ]
 
 env:
   CARGO_TERM_COLOR: always
