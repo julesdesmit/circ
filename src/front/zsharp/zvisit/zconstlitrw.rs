@@ -1,12 +1,12 @@
 //! AST Walker for zokrates_pest_ast
 
-use super::{ZVisitorMut, ZVisitorResult};
+use super::{ZVisitorMut, ZVisitorError, ZVisitorResult};
 use super::super::term::Ty;
 use super::walkfns::*;
 
 use zokrates_pest_ast as ast;
 
-// XXX(TODO) use ast::Type rather than Ty here
+// XXX(q) use ast::Type rather than Ty here? (if so, why?)
 pub(in super::super) struct ZConstLiteralRewriter {
     to_ty: Option<Ty>,
     found: bool,
@@ -56,7 +56,7 @@ impl<'ast> ZVisitorMut<'ast> for ZConstLiteralRewriter {
         -> descend into SpreadOrExpression, looking for either array or element type
 
     InlineStruct(InlineStructExpression<'ast>),
-        -> XXX(unimpl) we do not know expected type (const structs not supported)
+        -> check that struct types are equal
 
     ArrayInitializer(ArrayInitializerExpression<'ast>),
         -> value should have type of value inside Array
@@ -162,6 +162,7 @@ impl<'ast> ZVisitorMut<'ast> for ZConstLiteralRewriter {
         Ok(())
     }
 
+    // XXX(rsw) how does this play with generic structs?
     fn visit_inline_struct_expression(
         &mut self,
         ise: &mut ast::InlineStructExpression<'ast>,
@@ -169,9 +170,48 @@ impl<'ast> ZVisitorMut<'ast> for ZConstLiteralRewriter {
         self.visit_identifier_expression(&mut ise.ty)?;
 
         let to_ty = self.replace(None);
-        ise.members
-            .iter_mut()
-            .try_for_each(|m| self.visit_inline_struct_member(m))?;
+        let ty_map = if let Some(t) = to_ty.as_ref() {
+            if let Ty::Struct(name, ty_map) = t {
+                if name != &ise.ty.value {
+                    Err(format!("ZConstLiteralRewriter: got struct {}, expected {} visiting inline struct expression", &ise.ty.value, name))
+                } else {
+                    Ok(Some(ty_map.clone()))
+                }
+            } else {
+                Err("ZConstLiteralRewriter: rewriting InlineStructExpression to non-Struct type".to_string())
+            }
+        } else {
+            Ok(None)
+        }?;
+
+        if let Some(mut ty_map) = ty_map {
+            let (mem, str_name) = (&mut ise.members, &ise.ty.value);
+            mem.iter_mut()
+                .try_for_each(|m| ty_map
+                    .remove(&m.id.value)
+                    .ok_or_else(|| ZVisitorError(format!(
+                        "ZConstLiteralRewriter: no member {} in struct {}, or duplicate member in inline expression",
+                        &m.id.value,
+                        str_name,
+                    )))
+                    .and_then(|ty| {
+                        self.to_ty = Some(ty);
+                        self.visit_inline_struct_member(m)
+                    })
+                )?;
+
+            if !ty_map.is_empty() {
+                Err(format!(
+                    "ZConstLiteralRewriter: inline expression for struct {} has extra fields: {:?}",
+                    &ise.ty.value,
+                    ty_map.keys().collect::<Vec<_>>(),
+                ))?;
+            }
+        } else {
+            ise.members
+                .iter_mut()
+                .try_for_each(|m| self.visit_inline_struct_member(m))?;
+        }
         self.to_ty = to_ty;
 
         self.visit_span(&mut ise.span)
@@ -185,10 +225,7 @@ impl<'ast> ZVisitorMut<'ast> for ZConstLiteralRewriter {
             if let Ty::Array(_, arr_ty) = t.clone() {
                 Ok(Some(*arr_ty))
             } else {
-                Err(
-                    "ZConstLiteralRewriter: rewriting InlineArrayExpression to non-Array type"
-                        .to_string(),
-                )
+                Err("ZConstLiteralRewriter: rewriting InlineArrayExpression to non-Array type".to_string())
             }
         } else {
             Ok(None)

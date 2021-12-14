@@ -969,7 +969,7 @@ impl<'ast> ZGen<'ast> {
                 Ok(arr)
             }
             ast::Expression::InlineStruct(u) => {
-                // XXX(rsw) for now, do type checking here to catch bad const decls. better way?
+                // XXX(rsw) CHECK: fully redundant with ZConstLiteralRewriter / ZStatementWalker?
                 let mut sm_types = self.get_struct(&u.ty.value)
                     .ok_or_else(|| format!("Undefined struct type '{}' evaluating const expr", &u.ty.value))?
                     .fields
@@ -998,7 +998,7 @@ impl<'ast> ZGen<'ast> {
 
                 if !sm_types.is_empty() {
                     Err(format!(
-                        "Inline expression for struct {} has extra or missing fields: {:#?}",
+                        "Inline expression for struct {} has extra fields: {:#?}",
                         &u.ty.value,
                         sm_types.keys().collect::<Vec<_>>(),
                     ))
