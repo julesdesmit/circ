@@ -20,7 +20,9 @@ use zokrates_pest_ast as ast;
 use term::*;
 use zvisit::{ZConstLiteralRewriter, ZStatementWalker, ZVisitorMut};
 
-/// The modulus for the ZSharp language.
+/// The modulus for the ZSharp language
+pub use term::ZSHARP_MODULUS;
+/// The modulus for the ZSharp language (ARC)
 pub use term::ZSHARP_MODULUS_ARC;
 
 /// The prover visibility

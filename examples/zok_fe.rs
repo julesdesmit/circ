@@ -2,16 +2,14 @@
 use bellman::gadgets::test::TestConstraintSystem;
 use bellman::Circuit;
 use bls12_381::Scalar;
-use circ::front::zokrates::{Inputs, Mode, Zokrates};
+use circ::front::zsharp::{Inputs, Mode, ZSharpFE};
 use circ::front::FrontEnd;
 use circ::ir::opt::{opt, Opt};
 use circ::target::aby::output::write_aby_exec;
 use circ::target::aby::trans::to_aby;
-use circ::target::ilp::trans::to_ilp;
 use circ::target::r1cs::opt::reduce_linearities;
 use circ::target::r1cs::trans::to_r1cs;
 use env_logger;
-use good_lp::default_solver;
 use std::path::PathBuf;
 use structopt::StructOpt;
 
@@ -20,7 +18,7 @@ use structopt::StructOpt;
 struct Options {
     /// Input file
     #[structopt(parse(from_os_str))]
-    zokrates_path: PathBuf,
+    zsharp_path: PathBuf,
 
     /// File with input witness
     #[structopt(short, long, name = "FILE", parse(from_os_str))]
@@ -41,7 +39,6 @@ fn main() {
         .format_timestamp(None)
         .init();
     let options = Options::from_args();
-    //let path_buf = options.zokrates_path.clone();
     println!("{:?}", options);
     let mode = if options.maximize {
         Mode::Opt
@@ -52,73 +49,10 @@ fn main() {
         }
     };
     let inputs = Inputs {
-        file: options.zokrates_path,
+        file: options.zsharp_path,
         inputs: options.inputs,
         mode: mode.clone(),
     };
-    let cs = Zokrates::gen(inputs);
+    let cs = ZSharpFE::gen(inputs);
     println!("{:?}", cs);
-
-    /*
-    let cs = match mode {
-        Mode::Opt => opt(cs, vec![Opt::ConstantFold]),
-        Mode::Mpc(_) => opt(
-            cs,
-            vec![Opt::Sha, Opt::ConstantFold, Opt::Mem, Opt::ConstantFold],
-        ),
-        Mode::Proof => opt(
-            cs,
-            vec![
-                Opt::Flatten,
-                Opt::Sha,
-                Opt::ConstantFold,
-                Opt::Flatten,
-                Opt::FlattenAssertions,
-                Opt::Inline,
-                Opt::Mem,
-                Opt::Flatten,
-                Opt::FlattenAssertions,
-                Opt::ConstantFold,
-                Opt::Inline,
-            ],
-        ),
-    };
-    println!("Done with IR optimization");
-
-    match mode {
-        Mode::Proof => {
-            println!("Converting to r1cs");
-            let r1cs = to_r1cs(cs, circ::front::zokrates::ZOKRATES_MODULUS.clone());
-            println!("Pre-opt R1cs size: {}", r1cs.constraints().len());
-            let r1cs = reduce_linearities(r1cs);
-            println!("Final R1cs size: {}", r1cs.constraints().len());
-        }
-        Mode::Mpc(_) => {
-            println!("Converting to aby");
-            let aby = to_aby(cs);
-            write_aby_exec(aby, path_buf);
-        }
-        Mode::Opt => {
-            println!("Converting to ilp");
-            let ilp = to_ilp(cs);
-            let solver_result = ilp.solve(default_solver);
-            let (max, vars) = solver_result.expect("ILP could not be solved");
-            println!("Max value: {}", max.round() as u64);
-            println!("Assignment:");
-
-            for (var, val) in &vars {
-                println!("  {}: {}", var, val.round() as u64);
-            }
-        }
-    }
-
-    //r1cs.check_all();
-    //let mut cs = TestConstraintSystem::<Scalar>::new();
-    //r1cs.synthesize(&mut cs).unwrap();
-    //println!("Num constraints: {}", cs.num_constraints());
-    //println!("{}", cs.pretty_print());
-    //if let Some(c) = cs.which_is_unsatisfied() {
-    //    panic!("Unsat: {}", c);
-    //}
-    */
 }

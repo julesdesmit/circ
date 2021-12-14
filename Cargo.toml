@@ -48,5 +48,13 @@ default = ["lp", "bls12381"]
 lp = ["good_lp", "lp-solvers"]
 bls12381 = []
 
+[[example]]
+name = "circ"
+required-features = ["lp"]
+
+[[example]]
+name = "opa_bench"
+required-features = ["lp"]
+
 [profile.release]
 debug = true
