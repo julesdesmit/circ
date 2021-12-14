@@ -1,7 +1,7 @@
 //! AST Walker for zokrates_pest_ast
 
 use super::eqtype::*;
-use super::ZStatementWalker;
+use super::{bos_to_type, ZStatementWalker};
 use super::super::{ZVisitorError, ZVisitorMut, ZVisitorResult};
 
 use zokrates_pest_ast as ast;
@@ -260,40 +260,51 @@ impl<'ast, 'ret, 'wlk> ZVisitorMut<'ast> for ZExpressionTyper<'ast, 'ret, 'wlk> 
         assert!(self.ty.is_none());
         assert!(!iae.expressions.is_empty());
 
-        // XXX(unimpl) does not check array lengths
-        let (sp, ex) = (&iae.span, &mut iae.expressions);
         let mut acc_ty = None;
-        ex.iter_mut().try_for_each::<_, ZVisitorResult>(|soe| {
+        let mut acc_len = 0;
+        iae.expressions.iter_mut().try_for_each::<_, ZVisitorResult>(|soe| {
             self.visit_spread_or_expression(soe)?;
             if let Some(ty) = self.take() {
-                let ty = if matches!(soe, ast::SpreadOrExpression::Expression(_)) {
-                    ast::Type::Array(self.arrayize(
-                        ty,
-                        ast::Expression::Literal(ast::LiteralExpression::HexLiteral(
-                            ast::HexLiteralExpression {
-                                value: ast::HexNumberExpression::U32(ast::U32NumberExpression {
-                                    value: "0x0000".to_string(),
-                                    span: sp.clone(),
-                                }),
-                                span: sp.clone(),
-                            },
-                        )),
-                        sp,
-                    ))
+                let (nty, nln) = if matches!(soe, ast::SpreadOrExpression::Expression(_)) {
+                    Ok((ty, 1))
+                } else if let ast::Type::Array(mut at) = ty {
+                    assert!(!at.dimensions.is_empty());
+                    let len = self.walker.zgen.const_usize_r_(&at.dimensions[0])?;
+                    if at.dimensions.len() == 1 {
+                        Ok((bos_to_type(at.ty), len))
+                    } else {
+                        at.dimensions.remove(0);
+                        Ok((ast::Type::Array(at), len))
+                    }
                 } else {
-                    ty
-                };
+                    Err(format!("Spread expression: expected array, got {:?}", ty))
+                }?;
 
                 if let Some(acc) = &acc_ty {
-                    eq_type(acc, &ty)?;
+                    eq_type(acc, &nty)?;
                 } else {
-                    acc_ty.replace(ty);
+                    acc_ty.replace(nty);
                 }
+                acc_len += nln;
+                Ok(())
+            } else {
+                Err(ZVisitorError(format!("Could not type SpreadOrExpression {:#?}", soe)))
             }
-            Ok(())
         })?;
 
-        self.ty = acc_ty;
+        self.ty = acc_ty.map(|at| ast::Type::Array(self.arrayize(
+            at,
+            ast::Expression::Literal(ast::LiteralExpression::HexLiteral(
+                ast::HexLiteralExpression {
+                    value: ast::HexNumberExpression::U32(ast::U32NumberExpression {
+                        value: format!("0x{:04x}", acc_len),
+                        span: iae.span.clone(),
+                    }),
+                    span: iae.span.clone(),
+                },
+            )),
+            &iae.span
+        )));
         Ok(())
     }
 
