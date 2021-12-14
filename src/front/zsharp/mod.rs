@@ -563,7 +563,7 @@ impl<'ast> ZGen<'ast> {
                 Ok(T::Array(ty, vec![v; n]))
             }
             ast::Expression::Postfix(p) => {
-                // XXX(assume) no functions in arrays, etc.
+                // assume no functions in arrays, etc.
                 let (base, accs) = if let Some(ast::Access::Call(c)) = p.accesses.first() {
                     let (f_path, f_name) = self.deref_import(&p.id.value);
                     debug!("Call: {} {:?} {:?}", p.id.value, f_path, f_name);
@@ -577,7 +577,7 @@ impl<'ast> ZGen<'ast> {
                     let res = self.function_call(args, generics, f_path, f_name);
                      (self.unwrap(res, &c.span), &p.accesses[1..])
                 } else {
-                    // Assume no calls
+                    // assume no calls
                     (
                         self.unwrap(
                             self.circ_get_value(Loc::local(p.id.value.clone())),
@@ -1246,9 +1246,13 @@ impl<'ast> ZGen<'ast> {
             );
         }
 
-        // handle literal type inference using declared type
+        // rewrite literals in the const type decl
+        let mut v = ZConstLiteralRewriter::new(None);
+        v.visit_type(&mut c.ty)
+            .unwrap_or_else(|e| self.err(e.0, &c.span));
         let ctype = self.const_type_(&c.ty);
-        let mut v = ZConstLiteralRewriter::new(Some(ctype.clone()));
+        // handle literal type inference using declared type
+        v.replace(Some(ctype.clone()));
         v.visit_expression(&mut c.expression)
             .unwrap_or_else(|e| self.err(e.0, &c.span));
 
@@ -1273,10 +1277,12 @@ impl<'ast> ZGen<'ast> {
     }
 
     fn type_(&self, t: &ast::Type<'ast>) -> Ty {
+        debug!("Type: {:?}", t);
         self.type_impl_::<false>(t)
     }
 
     fn const_type_(&self, t: &ast::Type<'ast>) -> Ty {
+        debug!("Const type: {:?}", t);
         self.type_impl_::<true>(t)
     }
 
