@@ -868,10 +868,10 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                 _ => Ok(Basic(bt)),
             },
             Not(_) => match &bt {
-                Boolean(_) => Ok(Basic(bt)),
-                _ => Err(ZVisitorError(
-                    "ZStatementWalker: ! unary operator requires Bool operand".to_string(),
+                Field(_) => Err(ZVisitorError(
+                    "ZStatementWalker: ! unary operator requires U* or Bool operand".to_string(),
                 )),
+                _ => Ok(Basic(bt)),
             },
         }?;
 
