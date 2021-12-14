@@ -969,8 +969,8 @@ impl<'ast> ZGen<'ast> {
                 Ok(arr)
             }
             ast::Expression::InlineStruct(u) => {
-                // XXX(rsw) we do type checking here to catch bad const decls. better way?
-                let str_fields = self.get_struct(&u.ty.value)
+                // XXX(rsw) for now, do type checking here to catch bad const decls. better way?
+                let mut sm_types = self.get_struct(&u.ty.value)
                     .ok_or_else(|| format!("Undefined struct type '{}' evaluating const expr", &u.ty.value))?
                     .fields
                     .iter()
@@ -979,24 +979,31 @@ impl<'ast> ZGen<'ast> {
 
                 let members = u.members.iter()
                     .map(|m| {
-                        let d_ty = str_fields.get(&m.id.value);
+                        let d_ty = sm_types
+                            .remove(&m.id.value)
+                            .map(|t| self.const_type_(t))
+                            .ok_or_else(|| format!(
+                                "No such member {} in struct {}, or duplicate member in expression",
+                                &m.id.value,
+                                &u.ty.value,
+                            ))?;
                         let m_expr = self.const_expr_(&m.expression)?;
-                        match d_ty {
-                            None => Err(format!("No such member {} in struct {}", &m.id.value, &u.ty.value)),
-                            Some(t) if self.const_type_(t) != m_expr.type_() => Err(format!("Type mismatch: struct {} member {} expected type {}, found type {}", &u.ty.value, &m.id.value, self.const_type_(t), m_expr.type_())),
-                            _ => Ok((m.id.value.clone(), m_expr)),
+                        if d_ty != m_expr.type_() {
+                            Err(format!("Type mismatch: struct {} member {} expected type {}, found type {}", &u.ty.value, &m.id.value, d_ty, m_expr.type_()))
+                        } else {
+                            Ok((m.id.value.clone(), m_expr))
                         }
                     })
                     .collect::<Result<BTreeMap<_,_>,_>>()?;
 
-                if members.len() == str_fields.len() {
-                    Ok(T::Struct(u.ty.value.clone(), members))
-                } else {
+                if !sm_types.is_empty() {
                     Err(format!(
                         "Inline expression for struct {} has extra or missing fields: {:#?}",
                         &u.ty.value,
-                        str_fields.keys().filter(|k| !members.contains_key(k.as_str())).collect::<Vec<_>>(),
+                        sm_types.keys().collect::<Vec<_>>(),
                     ))
+                } else {
+                    Ok(T::Struct(u.ty.value.clone(), members))
                 }
             }
         }
