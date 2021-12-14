@@ -710,9 +710,18 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
         };
 
         // XXX(unimpl) does not check array lengths, just unifies types!
+        let exp_ty = if at.dimensions.len() == 1 {
+            bos_to_type(at.ty.clone())
+        } else {
+            ast::Type::Array(ast::ArrayType {
+                ty: at.ty.clone(),
+                dimensions: Vec::from(&at.dimensions[1..]),
+                span: at.span.clone(),
+            })
+        };
         ia.expressions.iter_mut().try_for_each(|soe| match soe {
             Spread(s) => self.unify_expression(Array(at.clone()), &mut s.expression),
-            Expression(e) => self.unify_expression(bos_to_type(at.ty.clone()), e),
+            Expression(e) => self.unify_expression(exp_ty.clone(), e),
         })
     }
 
