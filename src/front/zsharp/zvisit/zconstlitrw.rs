@@ -290,6 +290,17 @@ impl<'ast> ZVisitorMut<'ast> for ZConstLiteralRewriter {
         self.visit_span(&mut aty.span)
     }
 
+    fn visit_explicit_generics(
+        &mut self,
+        eg: &mut ast::ExplicitGenerics<'ast>,
+    ) -> ZVisitorResult {
+        // always rewrite ConstantGenericValue literals to type U32
+        let to_ty = self.replace(Some(Ty::Uint(32)));
+        walk_explicit_generics(self, eg)?;
+        self.to_ty = to_ty;
+        Ok(())
+    }
+
     fn visit_field_type(
         &mut self,
         fty: &mut ast::FieldType<'ast>,
