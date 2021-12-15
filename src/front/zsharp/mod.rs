@@ -970,44 +970,12 @@ impl<'ast> ZGen<'ast> {
                 }
                 Ok(arr)
             }
-            ast::Expression::InlineStruct(u) => {
-                // XXX(rsw) CHECK: fully redundant with ZConstLiteralRewriter / ZStatementWalker?
-                let mut sm_types = self.get_struct(&u.ty.value)
-                    .ok_or_else(|| format!("Undefined struct type '{}' evaluating const expr", &u.ty.value))?
-                    .fields
-                    .iter()
-                    .map(|f| (&f.id.value, &f.ty))
-                    .collect::<HashMap<_,_>>();
-
-                let members = u.members.iter()
-                    .map(|m| {
-                        let d_ty = sm_types
-                            .remove(&m.id.value)
-                            .map(|t| self.const_type_(t))
-                            .ok_or_else(|| format!(
-                                "No such member {} in struct {}, or duplicate member in expression",
-                                &m.id.value,
-                                &u.ty.value,
-                            ))?;
-                        let m_expr = self.const_expr_(&m.expression)?;
-                        if d_ty != m_expr.type_() {
-                            Err(format!("Type mismatch: struct {} member {} expected type {}, found type {}", &u.ty.value, &m.id.value, d_ty, m_expr.type_()))
-                        } else {
-                            Ok((m.id.value.clone(), m_expr))
-                        }
-                    })
-                    .collect::<Result<BTreeMap<_,_>,_>>()?;
-
-                if !sm_types.is_empty() {
-                    Err(format!(
-                        "Inline expression for struct {} has extra fields: {:#?}",
-                        &u.ty.value,
-                        sm_types.keys().collect::<Vec<_>>(),
-                    ))
-                } else {
-                    Ok(T::Struct(u.ty.value.clone(), members))
-                }
-            }
+            ast::Expression::InlineStruct(u) => u.members.iter()
+                    .map(|m| self.const_expr_(&m.expression)
+                        .map(|m_expr| (m.id.value.clone(), m_expr))
+                    )
+                    .collect::<Result<BTreeMap<_,_>,String>>()
+                    .map(|members| T::Struct(u.ty.value.clone(), members)),
         }
     }
 

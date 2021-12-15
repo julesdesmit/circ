@@ -709,7 +709,7 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             )));
         };
 
-        // XXX(unimpl) does not check array lengths, just unifies types!
+        // XXX(unimpl) does not check array lengths, just checks contained types!
         let exp_ty = if at.dimensions.len() == 1 {
             bos_to_type(at.ty.clone())
         } else {
