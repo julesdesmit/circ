@@ -1370,7 +1370,7 @@ impl<'ast> ZGen<'ast> {
             for d in f.declarations.iter() {
                 // XXX(opt) retain() declarations instead? if we don't need them, saves allocs
                 if let ast::SymbolDeclaration::Import(i) = d {
-                    let (src_path, src_names, dst_names) = match i {
+                    let (src_path, src_names, dst_names, i_span) = match i {
                         ast::ImportDirective::Main(m) => (
                             m.source.value.clone(),
                             vec!["main".to_owned()],
@@ -1385,6 +1385,7 @@ impl<'ast> ZGen<'ast> {
                                         .to_string_lossy()
                                         .to_string()
                                 })],
+                            &m.span,
                         ),
                         ast::ImportDirective::From(m) => (
                             m.source.value.clone(),
@@ -1398,6 +1399,7 @@ impl<'ast> ZGen<'ast> {
                                         .unwrap_or_else(|| s.id.value.clone())
                                 })
                                 .collect(),
+                            &m.span,
                         ),
                     };
                     assert!(src_names.len() > 0);
@@ -1412,7 +1414,10 @@ impl<'ast> ZGen<'ast> {
                         .into_iter()
                         .zip(dst_names.into_iter())
                         .for_each(|(sn, dn)| {
-                            imap.insert(dn, (abs_src_path.clone(), sn));
+                            if imap.contains_key(&dn) {
+                                self.err(format!("Import {} redeclared", dn), i_span);
+                            }
+                            assert!(imap.insert(dn, (abs_src_path.clone(), sn)).is_none());
                         });
 
                     // add included -> includer edge for later toposort
@@ -1511,7 +1516,8 @@ impl<'ast> ZGen<'ast> {
                         self.structs
                             .get_mut(self.file_stack.borrow().last().unwrap())
                             .unwrap()
-                            .insert(s.id.value.clone(), s_ast);
+                            .insert(s.id.value.clone(), s_ast)
+                            .map(|_| self.err(format!("Struct {} redefined", &s.id.value), &s.span));
                     }
                     ast::SymbolDeclaration::Function(f) => {
                         debug!("processing decl: fn {} in {}", f.id.value, p.display());
@@ -1546,7 +1552,8 @@ impl<'ast> ZGen<'ast> {
                         self.functions
                             .get_mut(self.file_stack.borrow().last().unwrap())
                             .unwrap()
-                            .insert(f.id.value.clone(), f_ast);
+                            .insert(f.id.value.clone(), f_ast)
+                            .map(|_| self.err(format!("Function {} redefined", &f.id.value), &f.span));
                     }
                     ast::SymbolDeclaration::Import(_) => (), // already handled in visit_imports
                 }
