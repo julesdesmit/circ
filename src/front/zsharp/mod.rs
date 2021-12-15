@@ -1040,6 +1040,7 @@ impl<'ast> ZGen<'ast> {
             self.file_stack_push(f_path);
             self.generics_stack_push(generics, f.generics);
             self.cvar_enter_function();
+            let ret_ty = f.returns.first().map(|r| self.type_(r)).unwrap_or(Ty::Bool);
             for (p, a) in f.parameters.into_iter().zip(args) {
                 let ty = self.const_type_(&p.ty);
                 self.cvar_declare_init(p.id.value, &ty, a)?;
@@ -1053,7 +1054,11 @@ impl<'ast> ZGen<'ast> {
             self.cvar_exit_function();
             self.generics_stack_pop();
             self.file_stack_pop();
-            Ok(ret)
+            if ret.type_() != ret_ty {
+                Err(format!("Return type mismatch: expected {}, got {}", ret_ty, ret.type_()))
+            } else {
+                Ok(ret)
+            }
         }
     }
 
