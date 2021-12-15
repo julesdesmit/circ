@@ -39,7 +39,7 @@ fn main() {
         .format_timestamp(None)
         .init();
     let options = Options::from_args();
-    println!("{:?}", options);
+    //println!("{:?}", options);
     let mode = if options.maximize {
         Mode::Opt
     } else {

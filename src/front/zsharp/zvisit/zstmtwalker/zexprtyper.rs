@@ -287,8 +287,12 @@ impl<'ast, 'ret, 'wlk> ZVisitorMut<'ast> for ZExpressionTyper<'ast, 'ret, 'wlk> 
                 }
                 acc_len += nln;
                 Ok(())
+            } else if matches!(soe, ast::SpreadOrExpression::Expression(_)) {
+                // assume expression type is OK, just increment count
+                acc_len += 1;
+                Ok(())
             } else {
-                Err(ZVisitorError(format!("Could not type SpreadOrExpression {:#?}", soe)))
+                Err(ZVisitorError(format!("Could not type SpreadOrExpression::Spread {:#?}", soe)))
             }
         })?;
 

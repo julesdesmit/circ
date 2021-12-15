@@ -19,3 +19,20 @@ add arithmetic-progression literal (to use with array-membership op)
 should we make range checks explicit in IR?
     we have power-of-2 right now
     add non-power-of-2 range check?
+
+
+===
+// Following is totally broken and seemingly unfixable w/out symbolic generic inf
+
+def last<N>(u32[N] a) -> u32:
+    return a[N-1]
+
+def foo<N>(u32[N] a) -> u32:
+    // can't compute 2*N and pass to last because it has to be a const value!
+    // (and cannot declare const values inside functions)
+    return last([...a, ...a])
+
+def main() -> u32:
+    return foo([1,2,3])
+
+// XXX do we want to add const decls *inside* functions to handle this case?

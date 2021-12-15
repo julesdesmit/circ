@@ -53,7 +53,6 @@ pub fn eq_array_type<'ast>(ty: &ast::ArrayType<'ast>, ty2: &ast::ArrayType<'ast>
 }
 
 pub fn eq_struct_type<'ast>(ty: &ast::StructType<'ast>, ty2: &ast::StructType<'ast>) -> ZVisitorResult {
-    // XXX(unimpl) can monomorphization break this?
     if &ty.id.value != &ty2.id.value {
         Err(ZVisitorError(format!(
             "struct type mismatch: expected {:?}, found {:?}",
