@@ -6,7 +6,6 @@ use super::walkfns::*;
 
 use zokrates_pest_ast as ast;
 
-// XXX(q) use ast::Type rather than Ty here? (if so, why?)
 pub(in super::super) struct ZConstLiteralRewriter {
     to_ty: Option<Ty>,
     found: bool,
@@ -162,7 +161,6 @@ impl<'ast> ZVisitorMut<'ast> for ZConstLiteralRewriter {
         Ok(())
     }
 
-    // XXX(rsw) how does this play with generic structs?
     fn visit_inline_struct_expression(
         &mut self,
         ise: &mut ast::InlineStructExpression<'ast>,

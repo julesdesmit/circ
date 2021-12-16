@@ -1243,7 +1243,7 @@ impl<'ast> ZGen<'ast> {
             .const_expr_(&c.expression)
             .unwrap_or_else(|e| self.err(e, c.expression.span()));
         if ctype != value.type_() {
-            self.err("Type mismatch in constant definition", &c.span);
+            self.err(format!("Type mismatch in constant definition: expected {:?}, got {:?}", ctype, value.type_()), &c.span);
         }
 
         // insert into constant map
@@ -1504,7 +1504,7 @@ impl<'ast> ZGen<'ast> {
                             .try_for_each(|r| v.visit_type(r))
                             .unwrap_or_else(|e| self.err(e.0, &f.span));
 
-                        // go through stmts rewriting literals and generics
+                        // go through stmts rewriting literals
                         let mut sw = ZStatementWalker::new(
                             f_ast.parameters.as_ref(),
                             f_ast.returns.as_ref(),
