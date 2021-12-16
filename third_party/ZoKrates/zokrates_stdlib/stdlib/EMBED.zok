@@ -1,7 +1,10 @@
 // this file contains dummy definitions of builtins
 // that are used for typechecking
 
-const u32 FIELD_SIZE_IN_BITS = 255
+def get_field_size() -> u32:
+    return 0u32
+
+const u32 FIELD_SIZE_IN_BITS = get_field_size()
 
 // XXX(unimpl)
 //sha256round

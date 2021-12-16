@@ -201,7 +201,7 @@ impl<'ast> ZGen<'ast> {
             }
             "unpack" => {
                 if args.len() != 1 {
-                    Err(format!("Got {} args to EMBED/{}, expected 1", args.len(), f_name))
+                    Err(format!("Got {} args to EMBED/unpack, expected 1", args.len()))
                 } else if generics.len() != 1 {
                     Err(format!("Got {} generic args to EMBED/unpack, expected 1", generics.len()))
                 } else {
@@ -213,7 +213,7 @@ impl<'ast> ZGen<'ast> {
             }
             "bit_array_le" => {
                 if args.len() != 2 {
-                    Err(format!("Got {} args to EMBED/{}, expected 1", args.len(), f_name))
+                    Err(format!("Got {} args to EMBED/bit_array_le, expected 1", args.len()))
                 } else if generics.len() != 1 {
                     Err(format!("Got {} generic args to EMBED/bit_array_le, expected 1", generics.len()))
                 } else {
@@ -224,6 +224,16 @@ impl<'ast> ZGen<'ast> {
                     let second_arg = args.pop().unwrap();
                     let first_arg = args.pop().unwrap();
                     bit_array_le(first_arg, second_arg, nbits)
+                }
+            }
+            "get_field_size" => {
+                if args.len() != 0 {
+                    Err(format!("Got {} args to EMBED/get_field_size, expected 0", args.len()))
+                } else if !generics.is_empty() {
+                    Err(format!("Got {} generic args to EMBED/get_field_size, expected 0", generics.len()))
+                } else {
+                    //Ok(T::Uint(32, bv_lit(u32::from_str_radix(vstr, 10).unwrap(), 32)))
+                    Ok(T::Uint(32, bv_lit(ZSHARP_MODULUS.significant_bits(), 32)))
                 }
             }
             _ => Err(format!("Unknown or unimplemented builtin '{}'", f_name)),

@@ -378,32 +378,56 @@ fn ult_uint(a: Term, b: Term) -> Term {
     term![Op::BvBinPred(BvBinPred::Ult); a, b]
 }
 
+// XXX(constr_opt) see TODO file - only need to expand to MIN of two bit-lengths if done right
+fn field_comp(a: Term, b: Term, op: BvBinPred) -> Term {
+    let len = ZSHARP_MODULUS.significant_bits() as usize;
+    let a_bv = term![Op::PfToBv(len); a];
+    let b_bv = term![Op::PfToBv(len); b];
+    term![Op::BvBinPred(op); a_bv, b_bv]
+}
+
+fn ult_field(a: Term, b: Term) -> Term {
+    field_comp(a, b, BvBinPred::Ult)
+}
+
 pub fn ult(a: T, b: T) -> Result<T, String> {
-    wrap_bin_pred("<", Some(ult_uint), None, None, a, b)
+    wrap_bin_pred("<", Some(ult_uint), Some(ult_field), None, a, b)
 }
 
 fn ule_uint(a: Term, b: Term) -> Term {
     term![Op::BvBinPred(BvBinPred::Ule); a, b]
 }
 
+fn ule_field(a: Term, b: Term) -> Term {
+    field_comp(a, b, BvBinPred::Ule)
+}
+
 pub fn ule(a: T, b: T) -> Result<T, String> {
-    wrap_bin_pred("<=", Some(ule_uint), None, None, a, b)
+    wrap_bin_pred("<=", Some(ule_uint), Some(ule_field), None, a, b)
 }
 
 fn ugt_uint(a: Term, b: Term) -> Term {
     term![Op::BvBinPred(BvBinPred::Ugt); a, b]
 }
 
+fn ugt_field(a: Term, b: Term) -> Term {
+    field_comp(a, b, BvBinPred::Ugt)
+}
+
 pub fn ugt(a: T, b: T) -> Result<T, String> {
-    wrap_bin_pred(">", Some(ugt_uint), None, None, a, b)
+    wrap_bin_pred(">", Some(ugt_uint), Some(ugt_field), None, a, b)
 }
 
 fn uge_uint(a: Term, b: Term) -> Term {
     term![Op::BvBinPred(BvBinPred::Uge); a, b]
 }
 
+fn uge_field(a: Term, b: Term) -> Term {
+    field_comp(a, b, BvBinPred::Uge)
+}
+
 pub fn uge(a: T, b: T) -> Result<T, String> {
-    wrap_bin_pred(">=", Some(uge_uint), None, None, a, b)
+    wrap_bin_pred(">=", Some(uge_uint), Some(uge_field), None, a, b)
 }
 
 pub fn pow(a: T, b: T) -> Result<T, String> {

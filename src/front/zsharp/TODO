@@ -20,3 +20,6 @@
 - add explicit-generic-expr
 
 - POW width - allow full width operand once we have range analysis
+
+- optimization: for a < b, only expand a to b's bit width;
+  a < b is (a_expansion == a) && (a_expansion < b_expansion)
