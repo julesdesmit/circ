@@ -18,3 +18,5 @@
 - generic inf: monomorphize at call time
 
 - add explicit-generic-expr
+
+- POW width - allow full width operand once we have range analysis
