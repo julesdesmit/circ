@@ -1354,7 +1354,7 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
         def: &mut ast::DefinitionStatement<'ast>,
     ) -> ZVisitorResult {
         // XXX(unimpl) no L<-R generic inference right now.
-        // REVISIT: if LHS is generic typed identifier and RHS has complete type, infer L<-R
+        // REVISIT: if LHS is generic typed identifier and RHS has complete type, infer L<-R?
         def.lhs
             .iter_mut()
             .try_for_each(|l| self.visit_typed_identifier_or_assignee(l))?;
@@ -1392,33 +1392,32 @@ impl<'ast, 'ret> ZVisitorMut<'ast> for ZStatementWalker<'ast, 'ret> {
         self.visit_span(&mut def.span)
     }
 
-    fn visit_typed_identifier_or_assignee(
+    fn visit_assignee(
         &mut self,
-        tioa: &mut ast::TypedIdentifierOrAssignee<'ast>,
+        asgn: &mut ast::Assignee<'ast>,
     ) -> ZVisitorResult {
-        use ast::TypedIdentifierOrAssignee::*;
-        match tioa {
-            Assignee(a) => {
-                if !self.var_defined(&a.id.value) {
-                    Err(ZVisitorError(format!(
-                        "ZStatementWalker: assignment to undeclared variable {}",
-                        &a.id.value
-                    )))
-                } else {
-                    self.visit_assignee(a)
-                }
-            }
-            TypedIdentifier(ti) => {
-                ZConstLiteralRewriter::new(None).visit_type(&mut ti.ty)?;
-                let ty = if let ast::Type::Struct(sty) = &mut ti.ty {
-                    self.monomorphic_struct(sty)?
-                } else {
-                    ti.ty.clone()
-                };
-                self.insert_var(&ti.identifier.value, ty)?;
-                self.visit_typed_identifier(ti)
-            }
+        if !self.var_defined(&asgn.id.value) {
+            Err(ZVisitorError(format!(
+                "ZStatementWalker: assignment to undeclared variable {}",
+                &asgn.id.value
+            )))
+        } else {
+            walk_assignee(self, asgn)
         }
+    }
+
+    fn visit_typed_identifier(
+        &mut self,
+        ti: &mut ast::TypedIdentifier<'ast>,
+    ) -> ZVisitorResult {
+        ZConstLiteralRewriter::new(None).visit_type(&mut ti.ty)?;
+        let ty = if let ast::Type::Struct(sty) = &mut ti.ty {
+            self.monomorphic_struct(sty)?
+        } else {
+            ti.ty.clone()
+        };
+        self.insert_var(&ti.identifier.value, ty)?;
+        walk_typed_identifier(self, ti)
     }
 
     fn visit_range_or_expression(
