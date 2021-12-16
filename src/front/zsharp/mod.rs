@@ -1223,7 +1223,7 @@ impl<'ast> ZGen<'ast> {
             .unwrap_or(false)
         {
             self.err(
-                format!("Constant {} redefined after import", &c.id.value),
+                format!("Constant {} clashes with import of same name", &c.id.value),
                 &c.span,
             );
         }
