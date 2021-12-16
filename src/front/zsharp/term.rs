@@ -335,7 +335,21 @@ fn eq_base(a: Term, b: Term) -> Term {
 }
 
 pub fn eq(a: T, b: T) -> Result<T, String> {
-    wrap_bin_pred("==", Some(eq_base), Some(eq_base), Some(eq_base), a, b)
+    if a.type_() != b.type_() {
+        Err(format!("Cannot '==' dissimilar types {} and {}", a.type_(), b.type_()))?;
+    }
+
+    match (a, b) {
+        (T::Array(_, al), T::Array(_, bl)) => al.into_iter()
+            .zip(bl.into_iter())
+            .map(|(at, bt)| eq(at, bt))
+            .try_fold(T::Bool(leaf_term(Op::Const(Value::Bool(true)))), |acc, nxt| and(acc, nxt?)),
+        (T::Struct(_, am), T::Struct(_, bm)) => am.into_iter()
+            .zip(bm.into_iter())
+            .map(|((ak, av), (bk, bv))| { assert_eq!(ak, bk); eq(av, bv) })
+            .try_fold(T::Bool(leaf_term(Op::Const(Value::Bool(true)))), |acc, nxt| and(acc, nxt?)),
+        (a, b) => wrap_bin_pred("==", Some(eq_base), Some(eq_base), Some(eq_base), a, b),
+    }
 }
 
 fn neq_base(a: Term, b: Term) -> Term {
@@ -343,7 +357,21 @@ fn neq_base(a: Term, b: Term) -> Term {
 }
 
 pub fn neq(a: T, b: T) -> Result<T, String> {
-    wrap_bin_pred("!=", Some(neq_base), Some(neq_base), Some(neq_base), a, b)
+    if a.type_() != b.type_() {
+        Err(format!("Cannot '!=' on dissimilar types {} and {}", a.type_(), b.type_()))?;
+    }
+
+    match (a, b) {
+        (T::Array(_, al), T::Array(_, bl)) => al.into_iter()
+            .zip(bl.into_iter())
+            .map(|(at, bt)| neq(at, bt))
+            .try_fold(T::Bool(leaf_term(Op::Const(Value::Bool(false)))), |acc, nxt| or(acc, nxt?)),
+        (T::Struct(_, am), T::Struct(_, bm)) => am.into_iter()
+            .zip(bm.into_iter())
+            .map(|((ak, av), (bk, bv))| { assert_eq!(ak, bk); neq(av, bv) })
+            .try_fold(T::Bool(leaf_term(Op::Const(Value::Bool(false)))), |acc, nxt| or(acc, nxt?)),
+        (a, b) => wrap_bin_pred("!=", Some(neq_base), Some(neq_base), Some(neq_base), a, b),
+    }
 }
 
 fn ult_uint(a: Term, b: Term) -> Term {

@@ -798,39 +798,41 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
                     let lty = self.type_expression(&mut be.left, &mut expr_walker)?;
                     let rty = self.type_expression(&mut be.right, &mut expr_walker)?;
                     match (&lty, &rty) {
-                            (Some(Basic(_)), None) => Ok((lty.clone().unwrap(), lty.unwrap())),
-                            (None, Some(Basic(_))) => Ok((rty.clone().unwrap(), rty.unwrap())),
-                            (Some(Basic(_)), Some(Basic(_))) => {
-                                let lty = lty.unwrap();
-                                let rty = rty.unwrap();
-                                eq_type(&lty, &rty)
-                                    .map_err(|e|
-                                    ZVisitorError(format!(
-                                        "ZStatementWalker: got differing types {:?}, {:?} for lhs, rhs of expr:\n{}\n{}",
-                                        &lty,
-                                        &rty,
-                                        e.0,
-                                        span_to_string(&be.span),
-                                    )))
-                                    .map(|_| (lty, rty))
-                            }
-                            (None, None) => Err(ZVisitorError(format!(
-                                "ZStatementWalker: could not infer type of binop:\n{}",
-                                span_to_string(&be.span),
-                            ))),
-                            _ => Err(ZVisitorError(format!(
-                                "ZStatementWalker: unknown error in binop typing:\n{}",
-                                span_to_string(&be.span),
-                            ))),
+                        (Some(lt), None) if matches!(lt, Basic(_)) || matches!(&be.op, Eq | NotEq) =>
+                            Ok((lty.clone().unwrap(), lty.unwrap())),
+                        (None, Some(rt)) if matches!(rt, Basic(_)) || matches!(&be.op, Eq | NotEq) =>
+                            Ok((rty.clone().unwrap(), rty.unwrap())),
+                        (Some(lt), Some(rt)) if (matches!(lt, Basic(_)) && matches!(rt, Basic(_))) || matches!(&be.op, Eq | NotEq) => {
+                            let lty = lty.unwrap();
+                            let rty = rty.unwrap();
+                            eq_type(&lty, &rty)
+                                .map_err(|e|
+                                ZVisitorError(format!(
+                                    "ZStatementWalker: got differing types {:?}, {:?} for lhs, rhs of expr:\n{}\n{}",
+                                    &lty,
+                                    &rty,
+                                    e.0,
+                                    span_to_string(&be.span),
+                                )))
+                                .map(|_| (lty, rty))
                         }
-                        .and_then(|(lty, rty)| if matches!(&be.op, Lt | Gt | Lte | Gte) && matches!(lty, Basic(Boolean(_))) {
-                            Err(ZVisitorError(format!(
-                                "ZStatementWalker: >,>=,<,<= operators cannot be applied to Bool:\n{}",
-                                span_to_string(&be.span),
-                            )))
-                        } else {
-                            Ok((lty, rty))
-                        })
+                        (None, None) => Err(ZVisitorError(format!(
+                            "ZStatementWalker: could not infer type of binop:\n{}",
+                            span_to_string(&be.span),
+                        ))),
+                        _ => Err(ZVisitorError(format!(
+                            "ZStatementWalker: unknown error in binop typing:\n{}",
+                            span_to_string(&be.span),
+                        ))),
+                    }
+                    .and_then(|(lty, rty)| if matches!(&be.op, Lt | Gt | Lte | Gte) && matches!(lty, Basic(Boolean(_))) {
+                        Err(ZVisitorError(format!(
+                            "ZStatementWalker: >,>=,<,<= operators cannot be applied to Bool:\n{}",
+                            span_to_string(&be.span),
+                        )))
+                    } else {
+                        Ok((lty, rty))
+                    })
                 }
                 _ => Err(ZVisitorError(
                     "ZStatementWalker: comparison and equality operators output Bool".to_owned(),
