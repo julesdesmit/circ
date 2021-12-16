@@ -7,6 +7,7 @@ use zokrates_pest_ast as ast;
 
 use log::debug;
 use std::collections::HashMap;
+use std::env::var_os;
 
 use crate::circify::includer::Loader;
 use rug::Integer;
@@ -47,6 +48,15 @@ impl ZStdLib {
     /// Looks for a "ZoKrates/zokrates_stdlib/stdlib" path in some ancestor of the current
     /// directory.
     pub fn new() -> Self {
+        if let Some(p) = var_os("ZSHARP_STDLIB_PATH") {
+            let p = PathBuf::from(p);
+            if p.exists() {
+                return Self { path: p };
+            } else {
+                panic!("ZStdLib: ZSHARP_STDLIB_PATH {:?} does not appear to exist", p);
+            }
+        }
+
         let p = std::env::current_dir().unwrap().canonicalize().unwrap();
         assert!(p.is_absolute());
         let stdlib_subdirs = vec![
@@ -109,6 +119,11 @@ impl ZLoad {
     /// Returns a map from file paths to parsed files.
     pub fn load<P: AsRef<Path>>(&self, p: &P) -> HashMap<PathBuf, ast::File> {
         self.recursive_load(p).unwrap()
+    }
+
+    /// Get ref to contained ZStdLib
+    pub fn stdlib(&self) -> &ZStdLib {
+        &self.stdlib
     }
 }
 

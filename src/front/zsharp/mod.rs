@@ -83,7 +83,7 @@ impl FrontEnd for ZSharpFE {
     fn gen(i: Inputs) -> Computation {
         let loader = parser::ZLoad::new();
         let asts = loader.load(&i.file);
-        let mut g = ZGen::new(i.inputs, asts, i.mode);
+        let mut g = ZGen::new(i.inputs, asts, i.mode, loader.stdlib());
         g.visit_files();
         g.file_stack_push(i.file);
         g.generics_stack_push(Vec::new(), Vec::new());
@@ -101,7 +101,7 @@ impl ZSharpFE {
 
         let loader = parser::ZLoad::new();
         let asts = loader.load(&i.file);
-        let mut g = ZGen::new(i.inputs, asts, i.mode);
+        let mut g = ZGen::new(i.inputs, asts, i.mode, loader.stdlib());
         g.visit_files();
         g.file_stack_push(i.file);
         g.generics_stack_push(Vec::new(), Vec::new());
@@ -111,7 +111,7 @@ impl ZSharpFE {
 
 struct ZGen<'ast> {
     circ: RefCell<Circify<ZSharp>>,
-    stdlib: parser::ZStdLib,
+    stdlib: &'ast parser::ZStdLib,
     asts: HashMap<PathBuf, ast::File<'ast>>,
     file_stack: RefCell<Vec<PathBuf>>,
     generics_stack: RefCell<Vec<HashMap<String, T>>>,
@@ -141,11 +141,11 @@ impl ZLoc {
 }
 
 impl<'ast> ZGen<'ast> {
-    fn new(inputs: Option<PathBuf>, asts: HashMap<PathBuf, ast::File<'ast>>, mode: Mode) -> Self {
+    fn new(inputs: Option<PathBuf>, asts: HashMap<PathBuf, ast::File<'ast>>, mode: Mode, stdlib: &'ast parser::ZStdLib) -> Self {
         let this = Self {
             circ: RefCell::new(Circify::new(ZSharp::new(inputs.map(|i| parser::parse_inputs(i))))),
             asts,
-            stdlib: parser::ZStdLib::new(),
+            stdlib,
             file_stack: Default::default(),
             generics_stack: Default::default(),
             functions: HashMap::new(),
