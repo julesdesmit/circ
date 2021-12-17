@@ -13,7 +13,7 @@
     - look at unpack functions again
 
 - stdlib rename to avoid confusion with parallel ZoK checkouts
-    - and/or: check ZSHARP_STDLIB_PATH envvar
+    [x] and/or: check ZSHARP_STDLIB_PATH envvar
 
 - generic inf: monomorphize at call time
 
