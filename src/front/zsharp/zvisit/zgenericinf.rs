@@ -1,7 +1,6 @@
 //! Generic inference
 
 
-use super::eqtype::*;
 use super::{ZResult, ZVisitorError, ZVisitorResult};
 use super::super::{ZGen, span_to_string};
 use super::super::term::{Ty, T, const_int, const_int_ref};
@@ -11,25 +10,30 @@ use zokrates_pest_ast as ast;
 
 pub(in super::super) struct ZGenericInf<'ast, 'gen> {
     zgen: &'gen ZGen<'ast>,
+    fdef: &'gen ast::FunctionDefinition<'ast>,
 }
 
 impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
-    pub fn new(zgen: &'gen ZGen<'ast>) -> Self {
-        Self { zgen }
+    pub fn new(zgen: &'gen ZGen<'ast>, fdef: &'gen ast::FunctionDefinition<'ast>) -> Self {
+        Self { zgen, fdef }
+    }
+
+    fn is_generic_var(&self, var: &str) -> bool {
+        self.fdef.generics.iter().any(|id| &id.value == var)
     }
     
-    fn unify_generic(
+    pub fn unify_generic(
         &self,
-        fdef: &ast::FunctionDefinition<'ast>,
         call: &ast::CallAccess<'ast>,
-        rty: Option<&ast::Type<'ast>>,
+        rty: Ty,
+        args: &Vec<T>,
     ) -> ZResult<HashMap<String, T>> {
         use ast::ConstantGenericValue as CGV;
 
-        // build up the already-known generics
+        // 1. build up the already-known generics
         let mut gens = HashMap::new();
         if let Some(eg) = call.explicit_generics.as_ref() {
-            for (cgv, id) in eg.values.iter().zip(fdef.generics.iter()) {
+            for (cgv, id) in eg.values.iter().zip(self.fdef.generics.iter()) {
                 if let Some(v) = match cgv {
                     CGV::Underscore(_) => None,
                     CGV::Value(v) => Some(self.zgen.literal_(v)),
@@ -40,8 +44,259 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
             }
         }
 
+        // 2. for each argument, update the const generic values
+        for (pty, arg) in self.fdef.parameters.iter().map(|p| &p.ty).zip(args.iter()) {
+            let aty = arg.type_();
+            self.fdef_gen_ty(aty, pty, &mut gens)?;
+        }
+
+        // 3. unify the return type
+        if let Some(ret) = self.fdef.returns.first() {
+            self.fdef_gen_ty(rty, ret, &mut gens)?;
+        } else if rty != Ty::Bool {
+            Err(format!("Function {} expected implicit Bool ret, but got {}", &self.fdef.id.value, rty))?;
+        }
+
         Ok(gens)
     }
+
+    fn fdef_gen_ty(
+        &self,
+        arg_ty: Ty,
+        def_ty: &ast::Type<'ast>,
+        gens: &mut HashMap<String, T>,
+    ) -> ZVisitorResult {
+        use ast::Type as TT;
+        match def_ty {
+            TT::Basic(dty_b) => self.fdef_gen_ty_basic(arg_ty, dty_b),
+            TT::Array(dty_a) => self.fdef_gen_ty_array(arg_ty, dty_a, gens),
+            TT::Struct(dty_s) => self.fdef_gen_ty_struct(arg_ty, dty_s, gens),
+        }
+    }
+
+    fn fdef_gen_ty_basic(
+        &self,
+        arg_ty: Ty,
+        bas_ty: &ast::BasicType<'ast>,
+    ) -> ZVisitorResult {
+        if arg_ty != self.zgen.type_(&ast::Type::Basic(bas_ty.clone())) {
+            Err(ZVisitorError(format!("Type mismatch unifying generics: got {}, decl was {:?}", arg_ty, bas_ty)))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn fdef_gen_ty_array(
+        &self,
+        mut arg_ty: Ty,
+        def_ty: &ast::ArrayType<'ast>,
+        gens: &mut HashMap<String, T>,
+    ) -> ZVisitorResult {
+        if !matches!(arg_ty, Ty::Array(_, _)) {
+            Err(format!("Type mismatch unifying generics: got {}, decl was Array", arg_ty))?;
+        }
+
+        // iterate through array dimensions, unifying each with fn decl
+        let mut dim_off = 0;
+        loop {
+            match arg_ty {
+                Ty::Array(arg_dim, nty) => {
+                    // make sure that we expect at least one more array dim
+                    if dim_off >= def_ty.dimensions.len() {
+                        Err(format!(
+                            "Type mismatch: got >={}-dim array, decl was {} dims",
+                            dim_off,
+                            def_ty.dimensions.len(),
+                        ))?;
+                    }
+
+                    // unify actual dimension with dim expression
+                    self.fdef_gen_ty_expr(arg_dim, &def_ty.dimensions[dim_off], gens)?;
+
+                    // iterate
+                    dim_off += 1;
+                    arg_ty = *nty;
+                }
+                nty => {
+                    // make sure we didn't expect any more array dims!
+                    if dim_off != def_ty.dimensions.len() {
+                        Err(format!(
+                            "Type mismatch: got {}-dim array, decl had {} dims",
+                            dim_off,
+                            def_ty.dimensions.len(),
+                        ))?;
+                    }
+
+                    arg_ty = nty;
+                    break;
+                }
+            };
+        }
+
+        use ast::BasicOrStructType as BoST;
+        match &def_ty.ty {
+            BoST::Struct(dty_s) => self.fdef_gen_ty_struct(arg_ty, dty_s, gens),
+            BoST::Basic(dty_b) => self.fdef_gen_ty_basic(arg_ty, dty_b),
+        }
+    }
+
+    fn fdef_gen_ty_struct(
+        &self,
+        arg_ty: Ty,
+        def_ty: &ast::StructType<'ast>,
+        gens: &mut HashMap<String, T>,
+    ) -> ZVisitorResult {
+        // check type and struct name
+        let aty_map = match arg_ty {
+            Ty::Struct(aty_n, aty_map) if &aty_n == &def_ty.id.value => Ok(aty_map),
+            Ty::Struct(aty_n, _) => Err(format!("Type mismatch: got struct {}, decl was struct {}", &aty_n, &def_ty.id.value)),
+            arg_ty => Err(format!("Type mismatch unifying generics: got {}, decl was Struct", arg_ty)),
+        }?;
+
+        // short-circuit if there are no generics in this struct
+        if self.zgen.get_struct(&def_ty.id.value)
+            .ok_or_else(|| format!("Unifying generics: No such struct {}. This should not happen!", &def_ty.id.value))?
+            .generics
+            .is_empty()
+        {
+            return if def_ty.explicit_generics.is_some() {
+                Err(ZVisitorError(format!(
+                    "Unifying generics: got explicit generics for non-generic struct type {}:\n{}",
+                    &def_ty.id.value,
+                    span_to_string(&def_ty.span),
+                )))
+            } else {
+                Ok(())
+            }
+        }
+
+        // XXX(unimpl) struct type in fn defn must provide explicit generics
+        use ast::ConstantGenericValue as CGV;
+        if def_ty.explicit_generics
+            .as_ref()
+            .map(|eg| eg.values.iter().any(|eg| matches!(eg, CGV::Underscore(_))))
+            .unwrap_or(true)
+        {
+            Err(format!(
+                "Cannot infer generic values for struct {} arg to function {}\nGeneric structs in fn defns must have explicit generics (possibly in terms of fn generics)",
+                &def_ty.id.value,
+                &self.fdef.id.value,
+            ))?;
+        }
+
+        // XXX(todo) infer via indirection through struct generic names? think about this some more
+        Ok(())
+
+    /*
+        // invariant: rty is LHS, therefore must have explicit generics
+        let dty_egvs = &dty.explicit_generics.as_ref().unwrap().values;
+        let rty_egvs = &rty.explicit_generics.as_ref().unwrap().values;
+        assert_eq!(dty_egvs.len(), rty_egvs.len());
+
+        // unify generic args to structs
+        dty_egvs
+            .iter()
+            .zip(rty_egvs.iter())
+            .try_for_each(|(dv, rv)| self.fdef_gen_ty_cgv(dv, rv, egv, gid_map))
+    */
+    }
+
+
+    // XXX(unimpl) only very simple expressions right now!
+    // in general, we'd like to write down a bunch of constraints
+    // of the form "expr = value" and then ask for a satisfying assignment
+    // for all of the variables...
+    fn fdef_gen_ty_expr(
+        &self,
+        arg_dim: usize,
+        def_exp: &ast::Expression<'ast>,
+        gens: &mut HashMap<String, T>,
+    ) -> ZVisitorResult {
+        use ast::Expression::*;
+        match def_exp {
+            Identifier(def_id) if self.is_generic_var(&def_id.value) => Ok(()),
+            _ => unimplemented!(),
+        }
+    }
+
+    /*
+        use ast::{Expression::*, ConstantGenericValue as CGV};
+        match (dexp, rexp) {
+            (Binary(dbin), Binary(rbin)) if dbin.op == rbin.op => {
+                // XXX(unimpl) improve support for complex const expression inference?
+                self.fdef_gen_ty_expr(dbin.left.as_ref(), rbin.left.as_ref(), egv, gid_map)?;
+                self.fdef_gen_ty_expr(dbin.right.as_ref(), rbin.right.as_ref(), egv, gid_map)
+            }
+            (Identifier(did), _) if matches!(rexp, Identifier(_) | Literal(_)) => {
+                if let Some(&doff) = gid_map.get(did.value.as_str()) {
+                    if matches!(&egv[doff], CGV::Underscore(_)) {
+                        egv[doff] = match rexp {
+                            Identifier(rid) => CGV::Identifier(rid.clone()),
+                            Literal(rle) => CGV::Value(rle.clone()),
+                            _ => unreachable!(),
+                        };
+                        Ok(())
+                    } else {
+                        match (&egv[doff], rexp) {
+                            (CGV::Identifier(did), Identifier(rid)) => self.fdef_gen_id_id(did, rid),
+                            (CGV::Identifier(did), Literal(rle)) => self.fdef_gen_id_le(did, rle),
+                            (CGV::Value(dle), Identifier(rid)) => self.fdef_gen_id_le(rid, dle),
+                            (CGV::Value(dle), Literal(rle)) => self.fdef_gen_le_le(dle, rle),
+                            _ => unreachable!(),
+                        }
+                    }
+                } else {
+                    match rexp {
+                        Identifier(rid) => self.fdef_gen_id_id(did, rid),
+                        Literal(rle) => self.fdef_gen_id_le(did, rle),
+                        _ => unreachable!(),
+                    }
+                }
+            }
+            (Identifier(did), _) => {
+                if let Some(&doff) = gid_map.get(did.value.as_str()) {
+                    if matches!(&egv[doff], CGV::Underscore(_)) {
+                        const_int(self.zgen.const_expr_(rexp)?)
+                            .map_err(|e| ZVisitorError(format!(
+                                "Inferring fn call generics: cannot constify expression {:?}: {}",
+                                rexp,
+                                e
+                            )))
+                            .and_then(|rval| match rval.to_u32() {
+                                Some(rval) => {
+                                    let span = rexp.span().clone();
+                                    let hne = ast::HexNumberExpression::U32(
+                                        ast::U32NumberExpression {
+                                            value: format!("0x{:08x}", rval),
+                                            span: span.clone(),
+                                        }
+                                    );
+                                    let hle = ast::HexLiteralExpression {
+                                        value: hne,
+                                        span: span.clone(),
+                                    };
+                                    egv[doff] = CGV::Value(
+                                        ast::LiteralExpression::HexLiteral(hle)
+                                    );
+                                    Ok(())
+                                }
+                                None => Err(ZVisitorError(format!(
+                                    "Inferring fn call generics: got generic value {} out of u32 range",
+                                    rval,
+                                ))),
+                            })
+                    } else {
+                        self.fdef_gen_expr_check(dexp, rexp)
+                    }
+                } else {
+                    self.fdef_gen_expr_check(dexp, rexp)
+                }
+            }
+            _ => self.fdef_gen_expr_check(dexp, rexp),
+        }
+*/
+}
+
 
     /*
 
@@ -122,115 +377,8 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
         Ok(HashMap::new());
     */
 
-    fn fdef_gen_ty(
-        &self,
-        dty: &ast::Type<'ast>,      // declared type (from fn defn)
-        rty: &ast::Type<'ast>,      // required type (from call context)
-        egv: &mut Vec<ast::ConstantGenericValue<'ast>>,
-        gid_map: &HashMap<&str, usize>,
-    ) -> ZVisitorResult {
-        use ast::Type::*;
-        match (dty, rty) {
-            (Basic(dty_b), Basic(rty_b)) => eq_basic_type(dty_b, rty_b)
-                .map_err(|e| ZVisitorError(format!("Inferring generic fn call: {}", e.0))),
-            (Array(dty_a), Array(rty_a)) => self.fdef_gen_ty_array(dty_a, rty_a, egv, gid_map),
-            (Struct(dty_s), Struct(rty_s)) => self.fdef_gen_ty_struct(dty_s, rty_s, egv, gid_map),
-            _ => Err(ZVisitorError(format!(
-                "Inferring generic fn call: type mismatch: expected {:?}, got {:?}",
-                rty,
-                dty,
-            ))),
-        }
-    }
 
-    fn fdef_gen_ty_array(
-        &self,
-        dty: &ast::ArrayType<'ast>,     // declared type (from fn defn)
-        rty: &ast::ArrayType<'ast>,     // required type (from call context)
-        egv: &mut Vec<ast::ConstantGenericValue<'ast>>,
-        gid_map: &HashMap<&str, usize>,
-    ) -> ZVisitorResult {
-        // check dimensions
-        if dty.dimensions.len() != rty.dimensions.len() {
-            return Err(ZVisitorError(format!(
-                "Inferring generic fn call: Array #dimensions mismatch: expected {}, got {}",
-                rty.dimensions.len(),
-                dty.dimensions.len(),
-            )));
-        }
-
-        // unify the type contained in the array
-        use ast::BasicOrStructType as BoST;
-        match (&dty.ty, &rty.ty) {
-            (BoST::Struct(dty_s), BoST::Struct(rty_s)) => self.fdef_gen_ty_struct(dty_s, rty_s, egv, gid_map),
-            (BoST::Basic(dty_b), BoST::Basic(rty_b)) => eq_basic_type(dty_b, rty_b)
-                .map_err(|e| ZVisitorError(format!("Inferring generic fn call: {}", e.0))),
-            _ => Err(ZVisitorError(format!(
-                "Inferring generic fn call: Array type mismatch: expected {:?}, got {:?}",
-                &rty.ty,
-                &dty.ty,
-            ))),
-        }?;
-
-        // unify the dimensions
-        dty.dimensions
-            .iter()
-            .zip(rty.dimensions.iter())
-            .try_for_each(|(dexp, rexp)| self.fdef_gen_ty_expr(dexp, rexp, egv, gid_map))
-    }
-
-    fn fdef_gen_ty_struct(
-        &self,
-        dty: &ast::StructType<'ast>,    // declared type (from fn defn)
-        rty: &ast::StructType<'ast>,    // required type (from call context)
-        egv: &mut Vec<ast::ConstantGenericValue<'ast>>,
-        gid_map: &HashMap<&str, usize>,
-    ) -> ZVisitorResult {
-        if &dty.id.value != &rty.id.value {
-            return Err(ZVisitorError(format!(
-                "Inferring generic in fn call: wanted struct {}, found struct {}",
-                &rty.id.value,
-                &dty.id.value,
-            )));
-        }
-        // make sure struct exists and short-circuit if it's not generic
-        if self.get_struct(&dty.id.value)?.generics.is_empty() {
-            return if dty.explicit_generics.is_some() {
-                Err(ZVisitorError(format!(
-                    "Inferring generic in fn call: got explicit generics for non-generic struct type {}:\n{}",
-                    &dty.id.value,
-                    span_to_string(&dty.span),
-                )))
-            } else {
-                Ok(())
-            };
-        }
-
-        // declared type in fn defn must provide explicit generics
-        use ast::ConstantGenericValue::*;
-        if dty.explicit_generics
-            .as_ref()
-            .map(|eg| eg.values.iter().any(|eg| matches!(eg, Underscore(_))))
-            .unwrap_or(true)
-        {
-            return Err(ZVisitorError(format!(
-                "Cannot infer generic values for struct {}\nGeneric structs in fn defns must have explicit generics (possibly in terms of fn generics)",
-                &dty.id.value,
-            )));
-        }
-
-        // invariant: rty is LHS, therefore must have explicit generics
-        let dty_egvs = &dty.explicit_generics.as_ref().unwrap().values;
-        let rty_egvs = &rty.explicit_generics.as_ref().unwrap().values;
-        assert_eq!(dty_egvs.len(), rty_egvs.len());
-
-        // unify generic args to structs
-        dty_egvs
-            .iter()
-            .zip(rty_egvs.iter())
-            .try_for_each(|(dv, rv)| self.fdef_gen_ty_cgv(dv, rv, egv, gid_map))
-    }
-
+    /*
     fn fdef_gen_ty_cgv(
         &self,
         dv: &ast::ConstantGenericValue<'ast>,   // declared type (from fn defn)
@@ -395,91 +543,4 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
             )))
         }
     }
-
-    fn fdef_gen_ty_expr(
-        &self,
-        dexp: &ast::Expression<'ast>,       // declared type (from fn defn)
-        rexp: &ast::Expression<'ast>,       // required type (from call context)
-        egv: &mut Vec<ast::ConstantGenericValue<'ast>>,
-        gid_map: &HashMap<&str, usize>,
-    ) -> ZVisitorResult {
-        use ast::{Expression::*, ConstantGenericValue as CGV};
-        match (dexp, rexp) {
-            (Binary(dbin), Binary(rbin)) if dbin.op == rbin.op => {
-                // XXX(unimpl) improve support for complex const expression inference?
-                self.fdef_gen_ty_expr(dbin.left.as_ref(), rbin.left.as_ref(), egv, gid_map)?;
-                self.fdef_gen_ty_expr(dbin.right.as_ref(), rbin.right.as_ref(), egv, gid_map)
-            }
-            (Identifier(did), _) if matches!(rexp, Identifier(_) | Literal(_)) => {
-                if let Some(&doff) = gid_map.get(did.value.as_str()) {
-                    if matches!(&egv[doff], CGV::Underscore(_)) {
-                        egv[doff] = match rexp {
-                            Identifier(rid) => CGV::Identifier(rid.clone()),
-                            Literal(rle) => CGV::Value(rle.clone()),
-                            _ => unreachable!(),
-                        };
-                        Ok(())
-                    } else {
-                        match (&egv[doff], rexp) {
-                            (CGV::Identifier(did), Identifier(rid)) => self.fdef_gen_id_id(did, rid),
-                            (CGV::Identifier(did), Literal(rle)) => self.fdef_gen_id_le(did, rle),
-                            (CGV::Value(dle), Identifier(rid)) => self.fdef_gen_id_le(rid, dle),
-                            (CGV::Value(dle), Literal(rle)) => self.fdef_gen_le_le(dle, rle),
-                            _ => unreachable!(),
-                        }
-                    }
-                } else {
-                    match rexp {
-                        Identifier(rid) => self.fdef_gen_id_id(did, rid),
-                        Literal(rle) => self.fdef_gen_id_le(did, rle),
-                        _ => unreachable!(),
-                    }
-                }
-            }
-            (Identifier(did), _) => {
-                if let Some(&doff) = gid_map.get(did.value.as_str()) {
-                    if matches!(&egv[doff], CGV::Underscore(_)) {
-                        const_int(self.zgen.const_expr_(rexp)?)
-                            .map_err(|e| ZVisitorError(format!(
-                                "Inferring fn call generics: cannot constify expression {:?}: {}",
-                                rexp,
-                                e
-                            )))
-                            .and_then(|rval| match rval.to_u32() {
-                                Some(rval) => {
-                                    let span = rexp.span().clone();
-                                    let hne = ast::HexNumberExpression::U32(
-                                        ast::U32NumberExpression {
-                                            value: format!("0x{:08x}", rval),
-                                            span: span.clone(),
-                                        }
-                                    );
-                                    let hle = ast::HexLiteralExpression {
-                                        value: hne,
-                                        span: span.clone(),
-                                    };
-                                    egv[doff] = CGV::Value(
-                                        ast::LiteralExpression::HexLiteral(hle)
-                                    );
-                                    Ok(())
-                                }
-                                None => Err(ZVisitorError(format!(
-                                    "Inferring fn call generics: got generic value {} out of u32 range",
-                                    rval,
-                                ))),
-                            })
-                    } else {
-                        self.fdef_gen_expr_check(dexp, rexp)
-                    }
-                } else {
-                    self.fdef_gen_expr_check(dexp, rexp)
-                }
-            }
-            _ => self.fdef_gen_expr_check(dexp, rexp),
-        }
-    }
-
-    fn get_struct(&self, id: &str) -> ZResult<&ast::StructDefinition<'ast>> { unimplemented!() }
-
-    fn generic_defined(&self, id: &str) -> bool { unimplemented!() }
-}
+    */
