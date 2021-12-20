@@ -1,25 +1,43 @@
 //! Generic inference
 
 
+use crate::ir::term::{term, Term};
 use super::{ZResult, ZVisitorError, ZVisitorResult};
 use super::super::{ZGen, span_to_string};
-use super::super::term::{Ty, T, const_int, const_int_ref};
+use super::super::term::{Ty, T};
 
+use rand::{distributions::Alphanumeric, Rng};
 use std::collections::HashMap;
 use zokrates_pest_ast as ast;
 
 pub(in super::super) struct ZGenericInf<'ast, 'gen> {
     zgen: &'gen ZGen<'ast>,
     fdef: &'gen ast::FunctionDefinition<'ast>,
+    gens: &'gen [ast::IdentifierExpression<'ast>],
+    pfx: String,
+    terms: Vec<Term>,
 }
 
 impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
     pub fn new(zgen: &'gen ZGen<'ast>, fdef: &'gen ast::FunctionDefinition<'ast>) -> Self {
-        Self { zgen, fdef }
+        let gens = fdef.generics.as_ref();
+        let pfx = (&mut rand::thread_rng())
+            .sample_iter(Alphanumeric)
+            .map(char::from)
+            .take(8)
+            .chain(fdef.id.value.chars())
+            .collect();
+        Self {
+            zgen,
+            fdef,
+            gens,
+            pfx,
+            terms: Vec::new(),
+        }
     }
 
     fn is_generic_var(&self, var: &str) -> bool {
-        self.fdef.generics.iter().any(|id| &id.value == var)
+        self.gens.iter().any(|id| &id.value == var)
     }
     
     pub fn unify_generic(
@@ -178,7 +196,7 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
             .unwrap_or(true)
         {
             Err(format!(
-                "Cannot infer generic values for struct {} arg to function {}\nGeneric structs in fn defns must have explicit generics (possibly in terms of fn generics)",
+                "Cannot infer generic values for struct {} arg to function {}\nGeneric structs in fn defns must have explicit generics (in terms of fn generic vars)",
                 &def_ty.id.value,
                 &self.fdef.id.value,
             ))?;
@@ -212,12 +230,18 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
         def_exp: &ast::Expression<'ast>,
         gens: &mut HashMap<String, T>,
     ) -> ZVisitorResult {
-        use ast::Expression::*;
-        match def_exp {
-            Identifier(def_id) if self.is_generic_var(&def_id.value) => Ok(()),
-            _ => unimplemented!(),
-        }
+        let expr_term = self.expr(def_exp)?;
+        // here, we need to assert that arg_dim == expr_term
+        Ok(())
     }
+
+    fn expr(
+        &self,
+        expr: &ast::Expression<'ast>,
+    ) -> ZVisitorResult {
+        Ok(())
+    }
+
 
     /*
         use ast::{Expression::*, ConstantGenericValue as CGV};
