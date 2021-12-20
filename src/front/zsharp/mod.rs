@@ -408,19 +408,19 @@ impl<'ast> ZGen<'ast> {
             ast::LiteralExpression::HexLiteral(h) => match &h.value {
                 ast::HexNumberExpression::U8(h) => Ok(T::Uint(
                         8,
-                        bv_lit(u8::from_str_radix(&h.value[2..], 16).unwrap(), 8),
+                        bv_lit(u8::from_str_radix(&h.value, 16).unwrap(), 8),
                 )),
                 ast::HexNumberExpression::U16(h) => Ok(T::Uint(
                     16,
-                    bv_lit(u16::from_str_radix(&h.value[2..], 16).unwrap(), 16),
+                    bv_lit(u16::from_str_radix(&h.value, 16).unwrap(), 16),
                 )),
                 ast::HexNumberExpression::U32(h) => Ok(T::Uint(
                     32,
-                    bv_lit(u32::from_str_radix(&h.value[2..], 16).unwrap(), 32),
+                    bv_lit(u32::from_str_radix(&h.value, 16).unwrap(), 32),
                 )),
                 ast::HexNumberExpression::U64(h) => Ok(T::Uint(
                     64,
-                    bv_lit(u64::from_str_radix(&h.value[2..], 16).unwrap(), 64),
+                    bv_lit(u64::from_str_radix(&h.value, 16).unwrap(), 64),
                 )),
             },
         }
