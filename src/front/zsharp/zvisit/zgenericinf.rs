@@ -1,10 +1,9 @@
-//! Generic inference
+//! Generic parameter inference
 
 
-use crate::ir::term::{term, Term};
-use super::{ZResult, ZVisitorError, ZVisitorResult};
+use crate::ir::term::{bv_lit, leaf_term, term, Op, Sort, Term};
 use super::super::{ZGen, span_to_string};
-use super::super::term::{Ty, T};
+use super::super::term::{Ty, T, cond, const_int};
 
 use rand::{distributions::Alphanumeric, Rng};
 use std::collections::HashMap;
@@ -14,42 +13,60 @@ pub(in super::super) struct ZGenericInf<'ast, 'gen> {
     zgen: &'gen ZGen<'ast>,
     fdef: &'gen ast::FunctionDefinition<'ast>,
     gens: &'gen [ast::IdentifierExpression<'ast>],
-    pfx: String,
+    sfx: String,
     terms: Vec<Term>,
 }
 
 impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
     pub fn new(zgen: &'gen ZGen<'ast>, fdef: &'gen ast::FunctionDefinition<'ast>) -> Self {
         let gens = fdef.generics.as_ref();
-        let pfx = (&mut rand::thread_rng())
-            .sample_iter(Alphanumeric)
-            .map(char::from)
-            .take(8)
-            .chain(fdef.id.value.chars())
-            .collect();
+        let sfx = Self::make_sfx(
+            (&mut rand::thread_rng())
+                .sample_iter(Alphanumeric)
+                .map(char::from)
+                .take(8)
+                .collect(),
+            &fdef.id.value,
+        );
         Self {
             zgen,
             fdef,
             gens,
-            pfx,
+            sfx,
             terms: Vec::new(),
         }
+    }
+
+    fn make_sfx(mut base: String, sfx: &str) -> String {
+        base.push('_');
+        base.push_str(sfx);
+        base
     }
 
     fn is_generic_var(&self, var: &str) -> bool {
         self.gens.iter().any(|id| &id.value == var)
     }
+
+    fn add_constraint(&mut self, lhs: Term, rhs: Term) {
+        self.terms.push(term![Op::Eq; lhs, rhs]);
+    }
+
+    fn make_varname(id: &str, sfx: &str) -> Term {
+        let mut tmp = String::from(id);
+        tmp.push('_');
+        tmp.push_str(sfx);
+        term![Op::Var(tmp, Sort::BitVector(32))]
+    }
     
     pub fn unify_generic(
-        &self,
+        &mut self,
         call: &ast::CallAccess<'ast>,
         rty: Ty,
         args: &Vec<T>,
-    ) -> ZResult<HashMap<String, T>> {
+    ) -> Result<HashMap<String, T>, String> {
         use ast::ConstantGenericValue as CGV;
 
         // 1. build up the already-known generics
-        let mut gens = HashMap::new();
         if let Some(eg) = call.explicit_generics.as_ref() {
             for (cgv, id) in eg.values.iter().zip(self.fdef.generics.iter()) {
                 if let Some(v) = match cgv {
@@ -57,7 +74,12 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
                     CGV::Value(v) => Some(self.zgen.literal_(v)),
                     CGV::Identifier(i) => Some(self.zgen.const_identifier_(i)),
                 } {
-                    gens.insert(id.value.clone(), v?);
+                    let var = Self::make_varname(&id.value, &self.sfx);
+                    let val = match v? {
+                        T::Uint(32, val) => Ok(val),
+                        v => Err(format!("ZGenericInf: ConstantGenericValue for {} had type {}, expected u32", &id.value, v.type_())),
+                    }?;
+                    self.add_constraint(var, val);
                 }
             }
         }
@@ -65,30 +87,33 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
         // 2. for each argument, update the const generic values
         for (pty, arg) in self.fdef.parameters.iter().map(|p| &p.ty).zip(args.iter()) {
             let aty = arg.type_();
-            self.fdef_gen_ty(aty, pty, &mut gens)?;
+            self.fdef_gen_ty(aty, pty)?;
         }
 
         // 3. unify the return type
         if let Some(ret) = self.fdef.returns.first() {
-            self.fdef_gen_ty(rty, ret, &mut gens)?;
+            self.fdef_gen_ty(rty, ret)?;
         } else if rty != Ty::Bool {
             Err(format!("Function {} expected implicit Bool ret, but got {}", &self.fdef.id.value, rty))?;
         }
 
-        Ok(gens)
+        // 4. run the solver on the term stack
+        // XXX(TODO)
+
+        // 5. extract the assignments from the solver result
+        Ok(HashMap::new())
     }
 
     fn fdef_gen_ty(
-        &self,
+        &mut self,
         arg_ty: Ty,
         def_ty: &ast::Type<'ast>,
-        gens: &mut HashMap<String, T>,
-    ) -> ZVisitorResult {
+    ) -> Result<(), String> {
         use ast::Type as TT;
         match def_ty {
             TT::Basic(dty_b) => self.fdef_gen_ty_basic(arg_ty, dty_b),
-            TT::Array(dty_a) => self.fdef_gen_ty_array(arg_ty, dty_a, gens),
-            TT::Struct(dty_s) => self.fdef_gen_ty_struct(arg_ty, dty_s, gens),
+            TT::Array(dty_a) => self.fdef_gen_ty_array(arg_ty, dty_a),
+            TT::Struct(dty_s) => self.fdef_gen_ty_struct(arg_ty, dty_s),
         }
     }
 
@@ -96,20 +121,19 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
         &self,
         arg_ty: Ty,
         bas_ty: &ast::BasicType<'ast>,
-    ) -> ZVisitorResult {
+    ) -> Result<(), String> {
         if arg_ty != self.zgen.type_(&ast::Type::Basic(bas_ty.clone())) {
-            Err(ZVisitorError(format!("Type mismatch unifying generics: got {}, decl was {:?}", arg_ty, bas_ty)))
+            Err(format!("Type mismatch unifying generics: got {}, decl was {:?}", arg_ty, bas_ty))
         } else {
             Ok(())
         }
     }
 
     fn fdef_gen_ty_array(
-        &self,
+        &mut self,
         mut arg_ty: Ty,
         def_ty: &ast::ArrayType<'ast>,
-        gens: &mut HashMap<String, T>,
-    ) -> ZVisitorResult {
+    ) -> Result<(), String> {
         if !matches!(arg_ty, Ty::Array(_, _)) {
             Err(format!("Type mismatch unifying generics: got {}, decl was Array", arg_ty))?;
         }
@@ -129,7 +153,7 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
                     }
 
                     // unify actual dimension with dim expression
-                    self.fdef_gen_ty_expr(arg_dim, &def_ty.dimensions[dim_off], gens)?;
+                    self.fdef_gen_ty_expr(arg_dim, &def_ty.dimensions[dim_off])?;
 
                     // iterate
                     dim_off += 1;
@@ -153,17 +177,16 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
 
         use ast::BasicOrStructType as BoST;
         match &def_ty.ty {
-            BoST::Struct(dty_s) => self.fdef_gen_ty_struct(arg_ty, dty_s, gens),
+            BoST::Struct(dty_s) => self.fdef_gen_ty_struct(arg_ty, dty_s),
             BoST::Basic(dty_b) => self.fdef_gen_ty_basic(arg_ty, dty_b),
         }
     }
 
     fn fdef_gen_ty_struct(
-        &self,
+        &mut self,
         arg_ty: Ty,
         def_ty: &ast::StructType<'ast>,
-        gens: &mut HashMap<String, T>,
-    ) -> ZVisitorResult {
+    ) -> Result<(), String> {
         // check type and struct name
         let aty_map = match arg_ty {
             Ty::Struct(aty_n, aty_map) if &aty_n == &def_ty.id.value => Ok(aty_map),
@@ -172,23 +195,22 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
         }?;
 
         // short-circuit if there are no generics in this struct
-        if self.zgen.get_struct(&def_ty.id.value)
-            .ok_or_else(|| format!("Unifying generics: No such struct {}. This should not happen!", &def_ty.id.value))?
-            .generics
-            .is_empty()
-        {
+        let strdef = self.zgen.get_struct(&def_ty.id.value)
+            .ok_or_else(|| format!("ZGenericInf: no such struct {}", &def_ty.id.value))?;
+
+        if strdef.generics.is_empty() {
             return if def_ty.explicit_generics.is_some() {
-                Err(ZVisitorError(format!(
+                Err(format!(
                     "Unifying generics: got explicit generics for non-generic struct type {}:\n{}",
                     &def_ty.id.value,
                     span_to_string(&def_ty.span),
-                )))
+                ))
             } else {
                 Ok(())
             }
         }
 
-        // XXX(unimpl) struct type in fn defn must provide explicit generics
+        // struct type in fn defn must provide explicit generics
         use ast::ConstantGenericValue as CGV;
         if def_ty.explicit_generics
             .as_ref()
@@ -202,47 +224,96 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
             ))?;
         }
 
-        // XXX(todo) infer via indirection through struct generic names? think about this some more
+        // 1. set up mapping from outer explicit generics to inner explicit generics
+        let new_sfx = Self::make_sfx(self.sfx.clone(), &def_ty.id.value);
+        def_ty.explicit_generics.as_ref().unwrap().values.iter()
+            .zip(strdef.generics.iter())
+            .try_for_each::<_,Result<(),String>>(|(cgv, id)| {
+                let sgid = Self::make_varname(&id.value, &new_sfx);
+                let val = match cgv {
+                    CGV::Underscore(_) => unreachable!(),
+                    CGV::Value(le) => {
+                        Self::u32_term(self.zgen.literal_(le)?)?
+                    }
+                    CGV::Identifier(id) => {
+                        if self.is_generic_var(&id.value) {
+                            Self::make_varname(&id.value, &self.sfx)
+                        } else {
+                            Self::u32_term(self.zgen.const_identifier_(&id)?)?
+                        }
+                    }
+                };
+                self.add_constraint(sgid, val);
+                Ok(())
+            })?;
+
+        // 2. walk through struct def to generate constraints on inner explicit generics
+        let old_sfx = std::mem::replace(&mut self.sfx, new_sfx);
+        let old_gens = std::mem::replace(&mut self.gens, &strdef.generics[..]);
+        // XXX(TODO)
+
+        // 3. pop stack and continue
+        self.gens = old_gens;
+        self.sfx = old_sfx;
         Ok(())
-
-    /*
-        // invariant: rty is LHS, therefore must have explicit generics
-        let dty_egvs = &dty.explicit_generics.as_ref().unwrap().values;
-        let rty_egvs = &rty.explicit_generics.as_ref().unwrap().values;
-        assert_eq!(dty_egvs.len(), rty_egvs.len());
-
-        // unify generic args to structs
-        dty_egvs
-            .iter()
-            .zip(rty_egvs.iter())
-            .try_for_each(|(dv, rv)| self.fdef_gen_ty_cgv(dv, rv, egv, gid_map))
-    */
     }
 
-
-    // XXX(unimpl) only very simple expressions right now!
-    // in general, we'd like to write down a bunch of constraints
-    // of the form "expr = value" and then ask for a satisfying assignment
-    // for all of the variables...
+    // turn an expr into a set of terms and assert equality
     fn fdef_gen_ty_expr(
-        &self,
+        &mut self,
         arg_dim: usize,
         def_exp: &ast::Expression<'ast>,
-        gens: &mut HashMap<String, T>,
-    ) -> ZVisitorResult {
-        let expr_term = self.expr(def_exp)?;
-        // here, we need to assert that arg_dim == expr_term
+    ) -> Result<(), String> {
+        let t = Self::u32_term(self.expr(def_exp)?)?;
+        self.add_constraint(bv_lit(arg_dim, 32), t);
         Ok(())
     }
 
     fn expr(
         &self,
         expr: &ast::Expression<'ast>,
-    ) -> ZVisitorResult {
-        Ok(())
+    ) -> Result<T, String> {
+        use ast::Expression::*;
+        match expr {
+            Ternary(te) => {
+                let cnd = self.expr(&te.first)?;
+                let csq = self.expr(&te.second)?;
+                let alt = self.expr(&te.third)?;
+                cond(cnd, csq, alt)
+            }
+            Binary(be) => {
+                let lhs = self.expr(&be.left)?;
+                let rhs = self.expr(&be.right)?;
+                let op = self.zgen.bin_op(&be.op);
+                op(lhs, rhs)
+            }
+            Unary(ue) => {
+                let exp = self.expr(&ue.expression)?;
+                let op = self.zgen.unary_op(&ue.op);
+                op(exp)
+            }
+            Identifier(id) => {
+                if self.is_generic_var(&id.value) {
+                    Ok(T::Uint(32, Self::make_varname(&id.value, &self.sfx)))
+                } else {
+                    self.zgen.const_identifier_(&id)
+                }
+            }
+            Literal(le) => self.zgen.literal_(le),
+            Postfix(_) => Err("ZGenericInf: got Postfix in array dim expr (unimpl)".into()),
+            InlineArray(_) => Err("ZGenericInf: got InlineArray in array dim expr (unimpl)".into()),
+            InlineStruct(_) => Err("ZGenericInf: got InlineStruct in array dim expr (unimpl)".into()),
+            ArrayInitializer(_) => Err("ZGenericInf: got ArrayInitializer in array dim expr (unimpl)".into()),
+        }
     }
 
-
+    fn u32_term(t: T) -> Result<Term, String> {
+        match t {
+            T::Uint(32, t) => Ok(t),
+            e => Err(format!("ZGenericInf: got {} for expr, expected T::Uint(32)", e.type_())),
+        }
+    }
+}
     /*
         use ast::{Expression::*, ConstantGenericValue as CGV};
         match (dexp, rexp) {
@@ -318,9 +389,20 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
             }
             _ => self.fdef_gen_expr_check(dexp, rexp),
         }
-*/
-}
+    */
 
+    /*
+        // invariant: rty is LHS, therefore must have explicit generics
+        let dty_egvs = &dty.explicit_generics.as_ref().unwrap().values;
+        let rty_egvs = &rty.explicit_generics.as_ref().unwrap().values;
+        assert_eq!(dty_egvs.len(), rty_egvs.len());
+
+        // unify generic args to structs
+        dty_egvs
+            .iter()
+            .zip(rty_egvs.iter())
+            .try_for_each(|(dv, rv)| self.fdef_gen_ty_cgv(dv, rv, egv, gid_map))
+    */
 
     /*
 
