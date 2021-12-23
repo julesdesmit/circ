@@ -18,7 +18,7 @@ use std::str::FromStr;
 use zokrates_pest_ast as ast;
 
 use term::*;
-use zvisit::{ZConstLiteralRewriter, ZStatementWalker, ZVisitorMut};
+use zvisit::{ZConstLiteralRewriter, ZGenericInf, ZStatementWalker, ZVisitorMut};
 
 /// The modulus for the ZSharp language
 pub use term::ZSHARP_MODULUS;
@@ -122,6 +122,7 @@ struct ZGen<'ast> {
     mode: Mode,
     cvars_stack: RefCell<Vec<Vec<HashMap<String, T>>>>,
     crets_stack: RefCell<Vec<Option<T>>>,
+    lhs_ty_stack: RefCell<Vec<Ty>>,
 }
 
 enum ZLoc {
@@ -155,6 +156,7 @@ impl<'ast> ZGen<'ast> {
             mode,
             cvars_stack: Default::default(),
             crets_stack: Default::default(),
+            lhs_ty_stack: Default::default(),
         };
         this.circ
             .borrow()
@@ -300,6 +302,7 @@ impl<'ast> ZGen<'ast> {
             }
             ast::Statement::Definition(d) => {
                 // XXX(unimpl) multi-assignment unimplemented
+                // XXX(TODO) get type of lhs, push onto stack
                 assert!(d.lhs.len() <= 1);
                 let e = self.expr(&d.expression);
                 if let Some(l) = d.lhs.first() {
@@ -577,6 +580,7 @@ impl<'ast> ZGen<'ast> {
             ast::Expression::Postfix(p) => {
                 // assume no functions in arrays, etc.
                 let (base, accs) = if let Some(ast::Access::Call(c)) = p.accesses.first() {
+                    // XXX(TODO) use top of lhs_ty_stack if p.accesses.len() == 1
                     let (f_path, f_name) = self.deref_import(&p.id.value);
                     debug!("Call: {} {:?} {:?}", p.id.value, f_path, f_name);
                     let args = c
@@ -929,6 +933,7 @@ impl<'ast> ZGen<'ast> {
             ast::Expression::Postfix(p) => {
                 assert!(p.accesses.len() > 0);
                 let (mut arr, accs) = if let Some(ast::Access::Call(c)) = p.accesses.first() {
+                    // XXX(TODO) use top of lhs_ty_stack if p.accesses.len() == 1
                     let (f_path, f_name) = self.deref_import(&p.id.value);
                     debug!("Const call: {} {:?} {:?}", p.id.value, f_path, f_name);
                     let args = c
@@ -938,6 +943,14 @@ impl<'ast> ZGen<'ast> {
                         .map(|e| self.const_expr_(e))
                         .collect::<Result<Vec<_>, _>>()?;
                     let generics = self.explicit_generic_values(c.explicit_generics.as_ref());
+                    let f = self
+                        .functions
+                        .get(&f_path)
+                        .ok_or_else(|| format!("No file '{:?}' attempting const fn call", &f_path))?
+                        .get(&f_name)
+                        .ok_or_else(|| format!("No function '{}' attempting const fn call", &f_name))?;
+                    let mut inf = ZGenericInf::new(self, f);
+                    inf.unify_generic(c, None, &args[..])?;
                     (self.const_function_call_(args, generics, f_path, f_name)?, &p.accesses[1..])
                 } else {
                     (self.const_identifier_(&p.id)?, &p.accesses[..])
@@ -1096,6 +1109,7 @@ impl<'ast> ZGen<'ast> {
             }
             ast::Statement::Definition(d) => {
                 // XXX(unimpl) multi-assignment unimplemented
+                // XXX(TODO) get type of lhs, push onto stack
                 assert!(d.lhs.len() <= 1);
                 let e = self.const_expr_(&d.expression)?;
                 if let Some(l) = d.lhs.first() {
@@ -1121,6 +1135,18 @@ impl<'ast> ZGen<'ast> {
                 }
             }
         }
+    }
+
+    fn lhs_ty_stack_push(&self, lhs_ty: Ty) {
+        self.lhs_ty_stack.borrow_mut().push(lhs_ty)
+    }
+
+    fn lhs_ty_stack_pop(&self) -> Option<Ty> {
+        self.lhs_ty_stack.borrow_mut().pop()
+    }
+
+    fn lhs_ty_stack_last(&self) -> Option<Ty> {
+        self.lhs_ty_stack.borrow().last().cloned()
     }
 
     fn cvar_enter_scope(&self) {
