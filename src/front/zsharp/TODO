@@ -23,3 +23,7 @@
 
 - optimization: for a < b, only expand a to b's bit width;
   a < b is (a_expansion == a) && (a_expansion < b_expansion)
+
+- field div / divrem
+    - impl unsigned
+    - think about signed
