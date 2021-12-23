@@ -3,7 +3,7 @@
 
 use crate::ir::term::{bv_lit, leaf_term, term, BoolNaryOp, Op, Sort, Term};
 use super::super::{ZGen, span_to_string};
-use super::super::term::{Ty, T, cond, const_int};
+use super::super::term::{Ty, T, cond};
 
 use rand::{distributions::Alphanumeric, Rng};
 use std::collections::HashMap;
@@ -74,8 +74,8 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
     pub fn unify_generic(
         &mut self,
         call: &ast::CallAccess<'ast>,
-        rty: Ty,
-        args: &Vec<T>,
+        rty: Option<Ty>,
+        args: &[T],
     ) -> Result<HashMap<String, T>, String> {
         use ast::ConstantGenericValue as CGV;
         // start from an empty constraint
@@ -107,10 +107,11 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
         }
 
         // 3. unify the return type
-        if let Some(ret) = self.fdef.returns.first() {
-            self.fdef_gen_ty(rty, ret)?;
-        } else if rty != Ty::Bool {
-            Err(format!("Function {} expected implicit Bool ret, but got {}", &self.fdef.id.value, rty))?;
+        match (rty, self.fdef.returns.first()) {
+            (Some(rty), Some(ret)) => self.fdef_gen_ty(rty, ret)?,
+            (Some(rty), None) if rty != Ty::Bool => Err(format!("Function {} expected implicit Bool ret, but got {}", &self.fdef.id.value, rty))?,
+            (Some(_), None) => (),
+            (None, _) => (),
         }
 
         // 4. run the solver on the term stack

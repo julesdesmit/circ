@@ -118,10 +118,15 @@ impl<'ast, 'ret> ZStatementWalker<'ast, 'ret> {
             .try_for_each(|(pty, arg)| self.unify_expression(pty, arg))?;
 
 
-        Ok(fdef.returns.first().cloned().unwrap_or_else(||
-            ast::Type::Basic(ast::BasicType::Boolean(
-                    ast::BooleanType { span: call.span.clone() }
-        ))))
+        let ret_ty = fdef.returns.first().cloned()
+            .unwrap_or_else(||
+                ast::Type::Basic(ast::BasicType::Boolean(
+                        ast::BooleanType { span: call.span.clone() }
+            )));
+        if let Some(ty) = rty {
+            eq_type(ty, &ret_ty)?;
+        }
+        Ok(ret_ty)
     }
 
     fn get_postfix_ty(
