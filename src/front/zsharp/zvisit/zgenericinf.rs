@@ -80,6 +80,7 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
         use ast::ConstantGenericValue as CGV;
         // start from an empty constraint
         self.constr = None;
+        self.gens = &self.fdef.generics[..];
 
         // 1. build up the already-known generics
         if let Some(eg) = call.explicit_generics.as_ref() {
@@ -114,6 +115,7 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
 
         // 4. run the solver on the term stack
         // XXX(TODO)
+        println!("{:#?}", self.constr);
 
         // 5. extract the assignments from the solver result
         Ok(HashMap::new())
