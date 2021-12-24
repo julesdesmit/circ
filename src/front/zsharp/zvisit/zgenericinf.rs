@@ -140,7 +140,8 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
         arg_ty: Ty,
         bas_ty: &ast::BasicType<'ast>,
     ) -> Result<(), String> {
-        if arg_ty != self.zgen.type_(&ast::Type::Basic(bas_ty.clone())) {
+        // XXX(q) dispatch to const_ or not? does not seem necessary because arg is Type::Basic
+        if arg_ty != self.zgen.const_type_(&ast::Type::Basic(bas_ty.clone())) {
             Err(format!("Type mismatch unifying generics: got {}, decl was {:?}", arg_ty, bas_ty))
         } else {
             Ok(())
