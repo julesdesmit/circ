@@ -1,7 +1,8 @@
 //! Generic parameter inference
 
 
-use crate::ir::term::{bv_lit, leaf_term, term, BoolNaryOp, Op, Sort, Term};
+use crate::ir::term::{bv_lit, leaf_term, term, BoolNaryOp, Op, Sort, Term, Value};
+use crate::target::smt::find_model;
 use super::super::{ZGen, span_to_string};
 use super::super::term::{Ty, T, cond};
 
@@ -20,7 +21,7 @@ pub(in super::super) struct ZGenericInf<'ast, 'gen> {
 impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
     pub fn new(zgen: &'gen ZGen<'ast>, fdef: &'gen ast::FunctionDefinition<'ast>) -> Self {
         let gens = fdef.generics.as_ref();
-        let sfx = Self::make_sfx(
+        let sfx = make_sfx(
             (&mut rand::thread_rng())
                 .sample_iter(Alphanumeric)
                 .map(char::from)
@@ -35,26 +36,6 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
             sfx,
             constr: None,
         }
-    }
-
-    fn u32_term(t: T) -> Result<Term, String> {
-        match t {
-            T::Uint(32, t) => Ok(t),
-            e => Err(format!("ZGenericInf: got {} for expr, expected T::Uint(32)", e.type_())),
-        }
-    }
-
-    fn make_sfx(mut base: String, sfx: &str) -> String {
-        base.push('_');
-        base.push_str(sfx);
-        base
-    }
-
-    fn make_varname(id: &str, sfx: &str) -> Term {
-        let mut tmp = String::from(id);
-        tmp.push('_');
-        tmp.push_str(sfx);
-        term![Op::Var(tmp, Sort::BitVector(32))]
     }
 
     fn is_generic_var(&self, var: &str) -> bool {
@@ -90,7 +71,7 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
                     CGV::Value(v) => Some(self.zgen.literal_(v)),
                     CGV::Identifier(i) => Some(self.zgen.const_identifier_(i)),
                 } {
-                    let var = Self::make_varname(&id.value, &self.sfx);
+                    let var = make_varname(&id.value, &self.sfx);
                     let val = match v? {
                         T::Uint(32, val) => Ok(val),
                         v => Err(format!("ZGenericInf: ConstantGenericValue for {} had type {}, expected u32", &id.value, v.type_())),
@@ -105,6 +86,9 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
             let aty = arg.type_();
             self.fdef_gen_ty(aty, pty)?;
         }
+        // bracketing invariant
+        assert!(self.gens == &self.fdef.generics[..]);
+        assert!(self.sfx.ends_with(&self.fdef.id.value));
 
         // 3. unify the return type
         match (rty, self.fdef.returns.first()) {
@@ -113,13 +97,30 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
             (Some(_), None) => (),
             (None, _) => (),
         }
+        // bracketing invariant
+        assert!(self.gens == &self.fdef.generics[..]);
+        assert!(self.sfx.ends_with(&self.fdef.id.value));
 
         // 4. run the solver on the term stack
-        // XXX(TODO)
-        println!("{:#?}", self.constr);
+        let mut solved = self.constr.as_ref()
+            .and_then(|t| find_model(t))
+            .unwrap_or_else(|| HashMap::new());
 
         // 5. extract the assignments from the solver result
-        Ok(HashMap::new())
+        let mut res = HashMap::new();
+        self.fdef.generics.iter().for_each(|gid| {
+            let mut g_name = make_varname_str(&gid.value, &self.sfx);
+            if let Some(g_val) = solved.remove(&g_name) {
+                match &g_val {
+                    Value::BitVector(bv) => assert!(bv.width() == 32),
+                    _ => unreachable!(),
+                }
+                g_name.truncate(gid.value.len());
+                g_name.shrink_to_fit();
+                assert!(res.insert(g_name, T::Uint(32, leaf_term(Op::Const(g_val)))).is_none());
+            }
+        });
+        Ok(res)
     }
 
     fn fdef_gen_ty(
@@ -243,21 +244,21 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
         }
 
         // 1. set up mapping from outer explicit generics to inner explicit generics
-        let new_sfx = Self::make_sfx(self.sfx.clone(), &def_ty.id.value);
+        let new_sfx = make_sfx(self.sfx.clone(), &def_ty.id.value);
         def_ty.explicit_generics.as_ref().unwrap().values.iter()
             .zip(strdef.generics.iter())
             .try_for_each::<_,Result<(),String>>(|(cgv, id)| {
-                let sgid = Self::make_varname(&id.value, &new_sfx);
+                let sgid = make_varname(&id.value, &new_sfx);
                 let val = match cgv {
                     CGV::Underscore(_) => unreachable!(),
                     CGV::Value(le) => {
-                        Self::u32_term(self.zgen.literal_(le)?)?
+                        u32_term(self.zgen.literal_(le)?)?
                     }
                     CGV::Identifier(id) => {
                         if self.is_generic_var(&id.value) {
-                            Self::make_varname(&id.value, &self.sfx)
+                            make_varname(&id.value, &self.sfx)
                         } else {
-                            Self::u32_term(self.zgen.const_identifier_(&id)?)?
+                            u32_term(self.zgen.const_identifier_(&id)?)?
                         }
                     }
                 };
@@ -297,7 +298,7 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
         arg_dim: usize,
         def_exp: &ast::Expression<'ast>,
     ) -> Result<(), String> {
-        let t = Self::u32_term(self.expr(def_exp)?)?;
+        let t = u32_term(self.expr(def_exp)?)?;
         self.add_constraint(bv_lit(arg_dim, 32), t);
         Ok(())
     }
@@ -327,7 +328,7 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
             }
             Identifier(id) => {
                 if self.is_generic_var(&id.value) {
-                    Ok(T::Uint(32, Self::make_varname(&id.value, &self.sfx)))
+                    Ok(T::Uint(32, make_varname(&id.value, &self.sfx)))
                 } else {
                     self.zgen.const_identifier_(&id)
                 }
@@ -339,4 +340,29 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
             ArrayInitializer(_) => Err("ZGenericInf: got ArrayInitializer in array dim expr (unimpl)".into()),
         }
     }
+}
+
+fn u32_term(t: T) -> Result<Term, String> {
+    match t {
+        T::Uint(32, t) => Ok(t),
+        e => Err(format!("ZGenericInf: got {} for expr, expected T::Uint(32)", e.type_())),
+    }
+}
+
+fn make_sfx(mut base: String, sfx: &str) -> String {
+    base.push('_');
+    base.push_str(sfx);
+    base
+}
+
+fn make_varname_str(id: &str, sfx: &str) -> String {
+    let mut tmp = String::from(id);
+    tmp.push('_');
+    tmp.push_str(sfx);
+    tmp
+}
+
+fn make_varname(id: &str, sfx: &str) -> Term {
+    let tmp = make_varname_str(id, sfx);
+    term![Op::Var(tmp, Sort::BitVector(32))]
 }
