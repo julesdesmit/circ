@@ -120,7 +120,7 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
                 }
                 g_name.truncate(gid.value.len());
                 g_name.shrink_to_fit();
-                assert!(res.insert(g_name, T::Uint(32, leaf_term(Op::Const(g_val)))).is_none());
+                assert!(res.insert(g_name, T::Uint(32, term![Op::Const(g_val)])).is_none());
             }
         });
         Ok(res)
