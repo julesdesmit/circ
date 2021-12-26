@@ -62,6 +62,9 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
         // start from an empty constraint
         self.constr = None;
         self.gens = &self.fdef.generics[..];
+        if self.gens.is_empty() {
+            return Ok(HashMap::new());
+        }
 
         // 1. build up the already-known generics
         if let Some(eg) = call.explicit_generics.as_ref() {

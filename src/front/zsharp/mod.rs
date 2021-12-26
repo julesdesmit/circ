@@ -86,7 +86,7 @@ impl FrontEnd for ZSharpFE {
         let mut g = ZGen::new(i.inputs, asts, i.mode, loader.stdlib());
         g.visit_files();
         g.file_stack_push(i.file);
-        g.generics_stack_push(Vec::new(), Vec::new());
+        g.generics_stack_push(HashMap::new());
         g.entry_fn("main");
         g.generics_stack_pop();
         g.file_stack_pop();
@@ -104,7 +104,7 @@ impl ZSharpFE {
         let mut g = ZGen::new(i.inputs, asts, i.mode, loader.stdlib());
         g.visit_files();
         g.file_stack_push(i.file);
-        g.generics_stack_push(Vec::new(), Vec::new());
+        g.generics_stack_push(HashMap::new());
         g.const_entry_fn("main")
     }
 }
@@ -479,22 +479,19 @@ impl<'ast> ZGen<'ast> {
         self.file_stack.borrow_mut().pop()
     }
 
-    fn generics_stack_push(&self, gvals: Vec<T>, gnames: Vec<ast::IdentifierExpression<'ast>>) {
-        self.generics_stack
-            .borrow_mut()
-            .push(gvals
-                .into_iter()
-                .zip(gnames.into_iter())
-                .map(|(g, n)| (n.value, g))
-                .collect()
-            );
+    fn generics_stack_push(&self, generics: HashMap<String, T>) {
+        self.generics_stack.borrow_mut().push(generics)
     }
 
     fn generics_stack_pop(&self) {
         self.generics_stack.borrow_mut().pop();
     }
 
-    fn explicit_generic_values(&self, eg: Option<&ast::ExplicitGenerics<'ast>>) -> Vec<T> {
+    fn explicit_generic_values(
+        &self,
+        eg: Option<&ast::ExplicitGenerics<'ast>>,
+        gv: Vec<ast::IdentifierExpression<'ast>>,
+    ) -> HashMap<String, T> {
         eg.map(|g| {
             g.values
                 .iter()
@@ -522,9 +519,11 @@ impl<'ast> ZGen<'ast> {
                         );
                     }
                 })
+                .zip(gv.into_iter())
+                .map(|(g, n)| (n.value, g))
                 .collect()
         })
-        .unwrap_or_else(|| Vec::new())
+        .unwrap_or_else(|| HashMap::new())
     }
 
     fn identifier_(&self, u: &ast::IdentifierExpression<'ast>) -> T {
@@ -587,7 +586,6 @@ impl<'ast> ZGen<'ast> {
             ast::Expression::Postfix(p) => {
                 // assume no functions in arrays, etc.
                 let (base, accs) = if let Some(ast::Access::Call(c)) = p.accesses.first() {
-                    // XXX(TODO) use top of lhs_ty_stack if p.accesses.len() == 1
                     let (f_path, f_name) = self.deref_import(&p.id.value);
                     debug!("Call: {} {:?} {:?}", p.id.value, f_path, f_name);
                     let args = c
@@ -596,21 +594,10 @@ impl<'ast> ZGen<'ast> {
                         .iter()
                         .map(|e| self.expr(e))
                         .collect::<Vec<_>>();
-                    let generics = self.explicit_generic_values(c.explicit_generics.as_ref());
-                    let f = self.unwrap(
-                        self.functions
-                            .get(&f_path)
-                            .ok_or_else(|| format!("No file '{:?}' attempting const fn call", &f_path))
-                            .and_then(|m| m.get(&f_name).ok_or_else(|| format!("No function '{}' attempting const fn call", &f_name))),
-                        &c.span,
-                    );
                     let exp_ty = self.lhs_ty_take()
                         .and_then(|ty| if p.accesses.len() > 1 { None } else { Some(ty) });
-                    self.unwrap(ZGenericInf::new(self, f).unify_generic(c, exp_ty, &args[..]),
-                        &p.span
-                    );
-                    let res = self.function_call(args, generics, f_path, f_name);
-                     (self.unwrap(res, &c.span), &p.accesses[1..])
+                    let res = self.function_call(args, c, exp_ty, f_path, f_name);
+                    (self.unwrap(res, &c.span), &p.accesses[1..])
                 } else {
                     // assume no calls
                     (
@@ -642,30 +629,41 @@ impl<'ast> ZGen<'ast> {
     fn function_call(
         &self,
         args: Vec<T>,
-        generics: Vec<T>,
+        call: &ast::CallAccess<'ast>,
+        exp_ty: Option<Ty>,
         f_path: PathBuf,
         f_name: String,
     ) -> Result<T, String> {
-        debug!("Function call: {} {:?} {:?} {:?}", f_name, f_path, args, generics);
+        debug!("Function call: {} {:?} {:?}", f_name, f_path, args);
+        let f = self
+            .functions
+            .get(&f_path)
+            .ok_or_else(|| format!("No file '{:?}' attempting fn call", &f_path))?
+            .get(&f_name)
+            .ok_or_else(|| format!("No function '{}' attempting fn call", &f_name))?;
+        let generics = ZGenericInf::new(self, f).unify_generic(call, exp_ty, &args[..])?;
+
         if self.stdlib.is_embed(&f_path) {
+            let mut generics = generics;
+            let generics = f.generics.iter()
+                .map(|gid| generics.remove(&gid.value).ok_or_else(|| format!(
+                    "Failed to find generic argument {} for builtin call {}",
+                    &gid.value,
+                    &f_name,
+                )))
+                .collect::<Result<Vec<_>,_>>()?;
             Self::builtin_call(&f_name, args, generics)
         } else {
-            let f = self
-                .functions
-                .get(&f_path)
-                .ok_or_else(|| format!("No file '{:?}' attempting fn call", &f_path))?
-                .get(&f_name)
-                .ok_or_else(|| format!("No function '{}' attempting fn call", &f_name))?
-                .clone();
+            let f = f.clone();
             if f.generics.len() != generics.len() {
                 return Err("Wrong number of generic params for function call".to_string());
             }
             if f.parameters.len() != args.len() {
                 return Err("Wrong nimber of arguments for function call".to_string());
             }
-            self.ret_ty_stack_push::<false>(&f);
             self.file_stack_push(f_path);
-            self.generics_stack_push(generics, f.generics);
+            self.generics_stack_push(generics);
+            self.ret_ty_stack_push::<false>(&f);
             // XXX(unimpl) tuple returns not supported
             assert!(f.returns.len() <= 1);
             let ret_ty = f.returns.first().map(|r| self.type_(r));
@@ -682,9 +680,9 @@ impl<'ast> ZGen<'ast> {
                 .circ_exit_fn()
                 .map(|a| a.unwrap_term())
                 .unwrap_or_else(|| Self::const_bool(false));
+            self.ret_ty_stack_pop();
             self.generics_stack_pop();
             self.file_stack_pop();
-            self.ret_ty_stack_pop();
             Ok(ret)
         }
     }
@@ -702,7 +700,7 @@ impl<'ast> ZGen<'ast> {
             panic!("No function '{:?}//{}' attempting const_entry_fn", &f_file, &f_name);
         }
 
-        self.const_function_call_(Vec::new(), Vec::new(), f_file, f_name)
+        self.const_function_call_(Vec::new(), None, None, f_file, f_name)
             .unwrap_or_else(|e| panic!("const_entry_fn failed: {}", e))
     }
 
@@ -964,17 +962,10 @@ impl<'ast> ZGen<'ast> {
                         .iter()
                         .map(|e| self.const_expr_(e))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let generics = self.explicit_generic_values(c.explicit_generics.as_ref());
-                    let f = self
-                        .functions
-                        .get(&f_path)
-                        .ok_or_else(|| format!("No file '{:?}' attempting const fn call", &f_path))?
-                        .get(&f_name)
-                        .ok_or_else(|| format!("No function '{}' attempting const fn call", &f_name))?;
                     let exp_ty = self.lhs_ty_take()
                         .and_then(|ty| if p.accesses.len() > 1 { None } else { Some(ty) });
-                    ZGenericInf::new(self, f).unify_generic(c, exp_ty, &args[..])?;
-                    (self.const_function_call_(args, generics, f_path, f_name)?, &p.accesses[1..])
+                    let res = self.const_function_call_(args, Some(c), exp_ty, f_path, f_name)?;
+                    (res, &p.accesses[1..])
                 } else {
                     (self.const_identifier_(&p.id)?, &p.accesses[..])
                 };
@@ -1028,21 +1019,36 @@ impl<'ast> ZGen<'ast> {
     fn const_function_call_(
         &self,
         args: Vec<T>,
-        generics: Vec<T>,
+        call: Option<&ast::CallAccess<'ast>>,
+        exp_ty: Option<Ty>,
         f_path: PathBuf,
         f_name: String,
     ) -> Result<T, String> {
-        debug!("Const function call: {} {:?} {:?} {:?}", f_name, f_path, args, generics);
-        if self.stdlib.is_embed(&f_path) {
-            Self::builtin_call(&f_name, args, generics)
-        } else {
-            let f = self
+        debug!("Const function call: {} {:?} {:?}", f_name, f_path, args);
+        let f = self
                 .functions
                 .get(&f_path)
                 .ok_or_else(|| format!("No file '{:?}' attempting const fn call", &f_path))?
                 .get(&f_name)
-                .ok_or_else(|| format!("No function '{}' attempting const fn call", &f_name))?
-                .clone();
+                .ok_or_else(|| format!("No function '{}' attempting const fn call", &f_name))?;
+        let generics = if let Some(c) = call {
+            ZGenericInf::new(self, f).unify_generic(c, exp_ty, &args[..])?
+        } else {
+            HashMap::new()
+        };
+
+        if self.stdlib.is_embed(&f_path) {
+            let mut generics = generics;
+            let generics = f.generics.iter()
+                .map(|gid| generics.remove(&gid.value).ok_or_else(|| format!(
+                    "Failed to find generic argument {} for const builtin call {}",
+                    &gid.value,
+                    &f_name,
+                )))
+                .collect::<Result<Vec<_>,_>>()?;
+            Self::builtin_call(&f_name, args, generics)
+        } else {
+            let f = f.clone();
             if f.generics.len() != generics.len() {
                 Err("Wrong number of generic params for function call".to_string())?;
             }
@@ -1051,11 +1057,11 @@ impl<'ast> ZGen<'ast> {
             }
             // XXX(unimpl) tuple returns not supported
             assert!(f.returns.len() <= 1);
-            self.ret_ty_stack_push::<true>(&f);
             self.file_stack_push(f_path);
-            self.generics_stack_push(generics, f.generics);
+            self.generics_stack_push(generics);
+            self.ret_ty_stack_push::<true>(&f);
             self.cvar_enter_function();
-            let ret_ty = f.returns.first().map(|r| self.type_(r)).unwrap_or(Ty::Bool);
+            let ret_ty = f.returns.first().map(|r| self.const_type_(r)).unwrap_or(Ty::Bool);
             for (p, a) in f.parameters.into_iter().zip(args) {
                 let ty = self.const_type_(&p.ty);
                 self.cvar_declare_init(p.id.value, &ty, a)?;
@@ -1065,9 +1071,9 @@ impl<'ast> ZGen<'ast> {
             }
             let ret = self.crets_pop();
             self.cvar_exit_function();
+            self.ret_ty_stack_pop();
             self.generics_stack_pop();
             self.file_stack_pop();
-            self.ret_ty_stack_pop();
             if ret.type_() != ret_ty {
                 Err(format!("Return type mismatch: expected {}, got {}", ret_ty, ret.type_()))
             } else {
@@ -1417,11 +1423,12 @@ impl<'ast> ZGen<'ast> {
                 let sdef = self.get_struct(&s.id.value).unwrap_or_else(||
                     self.err(format!("No such struct {}", &s.id.value), &s.span)
                 ).clone();
-                let generics = self.explicit_generic_values(s.explicit_generics.as_ref());
-                if generics.len() != sdef.generics.len() {
+                let g_len = sdef.generics.len();
+                let generics = self.explicit_generic_values(s.explicit_generics.as_ref(), sdef.generics);
+                if generics.len() != g_len {
                     self.err(format!("Struct {} is not monomorphized or wrong number of generic parameters", &s.id.value), &s.span);
                 }
-                self.generics_stack_push(generics, sdef.generics);
+                self.generics_stack_push(generics);
                 let ty = Ty::Struct(
                     s.id.value.clone(),
                     sdef.fields.into_iter().map(|f| (f.id.value, self.type_impl_::<IS_CNST>(&f.ty))).collect()
