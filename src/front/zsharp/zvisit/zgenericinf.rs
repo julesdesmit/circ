@@ -2,7 +2,7 @@
 
 
 use crate::ir::term::{bv_lit, leaf_term, term, BoolNaryOp, Op, Sort, Term, Value};
-use crate::target::smt::find_model;
+use crate::target::smt::find_unique_model;
 use super::super::{ZGen, span_to_string};
 use super::super::term::{Ty, T, cond};
 
@@ -105,20 +105,21 @@ impl<'ast, 'gen> ZGenericInf<'ast, 'gen> {
         assert!(self.sfx.ends_with(&self.fdef.id.value));
 
         // 4. run the solver on the term stack
+        let g_names = self.gens.iter().map(|gid| make_varname_str(&gid.value, &self.sfx)).collect::<Vec<_>>();
         let mut solved = self.constr.as_ref()
-            .and_then(|t| find_model(t))
+            .and_then(|t| find_unique_model(t, g_names.clone()))
             .unwrap_or_else(|| HashMap::new());
 
         // 5. extract the assignments from the solver result
         let mut res = HashMap::new();
-        self.fdef.generics.iter().for_each(|gid| {
-            let mut g_name = make_varname_str(&gid.value, &self.sfx);
+        assert_eq!(g_names.len(), self.gens.len());
+        g_names.into_iter().enumerate().for_each(|(idx, mut g_name)| {
             if let Some(g_val) = solved.remove(&g_name) {
                 match &g_val {
                     Value::BitVector(bv) => assert!(bv.width() == 32),
                     _ => unreachable!(),
                 }
-                g_name.truncate(gid.value.len());
+                g_name.truncate(self.gens[idx].value.len());
                 g_name.shrink_to_fit();
                 assert!(res.insert(g_name, T::Uint(32, term![Op::Const(g_val)])).is_none());
             }
