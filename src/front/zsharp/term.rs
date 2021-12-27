@@ -283,7 +283,7 @@ pub fn div(a: T, b: T) -> Result<T, String> {
 }
 
 fn rem_field(a: Term, b: Term) -> Term {
-    let len = ZSHARP_MODULUS.significant_bits() as usize - 1;
+    let len = ZSHARP_MODULUS.significant_bits() as usize;
     let a_bv = term![Op::PfToBv(len); a];
     let b_bv = term![Op::PfToBv(len); b];
     term![Op::UbvToPf(ZSHARP_MODULUS_ARC.clone()); term![Op::BvBinOp(BvBinOp::Urem); a_bv, b_bv]]
@@ -388,7 +388,7 @@ fn ult_uint(a: Term, b: Term) -> Term {
 // XXX(constr_opt) see TODO file - only need to expand to MIN of two bit-lengths if done right
 // XXX(constr_opt) do this using subtraction instead?
 fn field_comp(a: Term, b: Term, op: BvBinPred) -> Term {
-    let len = ZSHARP_MODULUS.significant_bits() as usize - 1;
+    let len = ZSHARP_MODULUS.significant_bits() as usize;
     let a_bv = term![Op::PfToBv(len); a];
     let b_bv = term![Op::PfToBv(len); b];
     term![Op::BvBinPred(op); a_bv, b_bv]
