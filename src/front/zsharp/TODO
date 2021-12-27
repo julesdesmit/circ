@@ -18,6 +18,8 @@
     - impl unsigned
     - think about signed
 
+- multi-returns?
+
 == done ==
 
 [x] generic inf: monomorphize at call time
