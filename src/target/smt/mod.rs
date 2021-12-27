@@ -278,9 +278,10 @@ pub fn check_sat(t: &Term) -> bool {
     solver.check_sat().unwrap()
 }
 
-fn get_model_solver(t: &Term) -> Solver<Parser> {
+fn get_model_solver(t: &Term, inc: bool) -> Solver<Parser> {
     let mut conf = SmtConf::default_cvc4();
     conf.models();
+    conf.set_incremental(inc);
     let mut solver = Solver::new(conf, Parser).unwrap();
     //solver.path_tee("solver_com").unwrap();
     for c in PostOrderIter::new(t.clone()) {
@@ -294,7 +295,7 @@ fn get_model_solver(t: &Term) -> Solver<Parser> {
 
 /// Get a satisfying assignment for `t`, assuming it is SAT.
 pub fn find_model(t: &Term) -> Option<HashMap<String, Value>> {
-    let mut solver = get_model_solver(t);
+    let mut solver = get_model_solver(t, false);
     solver.assert(&**t).unwrap();
     if solver.check_sat().unwrap() {
         Some(
@@ -312,7 +313,7 @@ pub fn find_model(t: &Term) -> Option<HashMap<String, Value>> {
 
 /// Get a unique satisfying assignment for `t`, assuming it is SAT.
 pub fn find_unique_model(t: &Term, uniqs: Vec<String>) -> Option<HashMap<String, Value>> {
-    let mut solver = get_model_solver(t);
+    let mut solver = get_model_solver(t, true);
     solver.assert(&**t).unwrap();
     // first, get the result
     let model: HashMap<String, Value> = if solver.check_sat().unwrap() {
